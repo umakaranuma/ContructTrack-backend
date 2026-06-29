@@ -100,8 +100,39 @@ class AdminLoginSerializer(serializers.Serializer):
 
 class ManagerListSerializer(serializers.ModelSerializer):
     """Compact manager listing for the owner's manager management screen."""
+    # Aliases expected by the owner-dashboard ManagerTable component
+    name         = serializers.CharField(source='full_name', read_only=True)
+    ref_code     = serializers.CharField(source='reference_code', read_only=True)
+    sites        = serializers.SerializerMethodField()
+    last_active  = serializers.SerializerMethodField()
+    status       = serializers.SerializerMethodField()
 
     class Meta:
         model = User
-        fields = ['id', 'full_name', 'email', 'phone', 'reference_code',
-                  'is_active', 'is_suspended', 'created_at']
+        fields = [
+            'id', 'full_name', 'name', 'email', 'phone',
+            'reference_code', 'ref_code',
+            'is_active', 'is_suspended',
+            'sites', 'last_active', 'status',
+            'created_at',
+        ]
+
+    def get_sites(self, obj):
+        from apps.sites.models import SiteManager
+        return list(
+            SiteManager.objects.filter(manager=obj, is_active=True)
+            .select_related('site')
+            .values_list('site__name', flat=True)
+        )
+
+    def get_last_active(self, obj):
+        from apps.progress.models import ProgressLog
+        log = ProgressLog.objects.filter(logged_by=obj).order_by('-log_date', '-created_at').first()
+        if log:
+            return log.created_at.isoformat()
+        return obj.created_at.isoformat()
+
+    def get_status(self, obj):
+        if obj.is_suspended:
+            return 'suspended'
+        return 'active' if obj.is_active else 'inactive'
