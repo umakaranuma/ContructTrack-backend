@@ -110,63 +110,251 @@ def site_detail(request, site_id):
         return success_response('Site deactivated.')
 
 
+def _get_site_for_user_or_none(user, site_id):
+    try:
+        return _get_sites_for_user(user).get(id=site_id)
+    except Site.DoesNotExist:
+        return None
+
+
+def _fetch_site_progress_logs(site, limit=50):
+    from collections import Counter
+    from apps.progress.models import ProgressLog
+    from apps.progress.serializers import SiteDailyLogSerializer
+    from apps.bills.models import Bill
+    from apps.attendance.models import AttendanceSummary
+
+    logs = list(
+        ProgressLog.objects.filter(site=site)
+        .select_related('logged_by')
+        .order_by('-log_date')[:limit]
+    )
+
+    if not logs:
+        return []
+
+    log_dates = [log.log_date for log in logs]
+    bills_by_date = Counter(
+        Bill.objects.filter(site=site, log_date__in=log_dates).values_list('log_date', flat=True)
+    )
+    attendance_by_date = {
+        s.log_date: s
+        for s in AttendanceSummary.objects.filter(site=site, log_date__in=log_dates)
+    }
+
+    return SiteDailyLogSerializer(
+        logs,
+        many=True,
+        context={'bills_by_date': bills_by_date, 'attendance_by_date': attendance_by_date},
+    ).data
+
+
+def _fetch_site_progress_photos(site):
+    from apps.progress.models import ProgressPhoto
+    from apps.progress.serializers import ProgressPhotoSerializer
+
+    photos = ProgressPhoto.objects.filter(progress_log__site=site).select_related('progress_log').order_by('-taken_at')
+    return ProgressPhotoSerializer(photos, many=True).data
+
+
+def _fetch_site_worker_roster(site):
+    """Aggregate per-worker attendance stats for the owner-dashboard table."""
+    from django.db.models import Sum
+    from apps.attendance.models import Worker, DailyAttendance
+
+    roster = []
+    for worker in Worker.objects.filter(site=site, is_active=True).order_by('full_name'):
+        records = DailyAttendance.objects.filter(worker=worker)
+        present = records.filter(status='present').count()
+        half = records.filter(status='half').count()
+        days = present + half * 0.5
+        earned = records.aggregate(t=Sum('total_earned_lkr'))['t'] or 0
+        paid = records.filter(is_paid=True).aggregate(t=Sum('total_earned_lkr'))['t'] or 0
+        roster.append({
+            'id': str(worker.id),
+            'name': worker.full_name,
+            'role': worker.role,
+            'days': days,
+            'total_earned': float(earned),
+            'total_paid': float(paid),
+        })
+    return roster
+
+
+def _submit_site_attendance(user, site, data):
+    """Shared bulk attendance submit used by mobile and owner-dashboard."""
+    from django.db import transaction
+    from django.db.models import Sum
+    from apps.attendance.models import Worker, DailyAttendance, AttendanceSummary
+
+    log_date = data.get('log_date')
+    is_rain_day = data.get('is_rain_day', False)
+    records = data.get('records', [])
+
+    if not log_date:
+        return None, error_response('log_date is required.', {}, 400)
+    if not records:
+        return None, error_response('records list cannot be empty.', {}, 400)
+
+    created_count = 0
+    errors = []
+
+    with transaction.atomic():
+        for rec in records:
+            worker_id = rec.get('worker_id')
+            try:
+                worker = Worker.objects.get(id=worker_id, site=site)
+            except Worker.DoesNotExist:
+                errors.append(f'Worker {worker_id} not found.')
+                continue
+
+            _, created = DailyAttendance.objects.update_or_create(
+                site=site,
+                worker=worker,
+                log_date=log_date,
+                defaults={
+                    'status': rec.get('status', 'present'),
+                    'overtime_hours': rec.get('overtime_hours', 0),
+                    'daily_rate_lkr': worker.daily_rate_lkr,
+                    'logged_by': user,
+                    'is_rain_day': is_rain_day,
+                    'is_synced': True,
+                },
+            )
+            if created:
+                created_count += 1
+
+        day_records = DailyAttendance.objects.filter(site=site, log_date=log_date)
+        total_wage = day_records.aggregate(t=Sum('total_earned_lkr'))['t'] or 0
+        p = day_records.filter(status='present').count()
+        h = day_records.filter(status='half').count()
+        a = day_records.filter(status='absent').count()
+
+        AttendanceSummary.objects.update_or_create(
+            site=site, log_date=log_date,
+            defaults={
+                'total_present': p, 'total_half': h, 'total_absent': a,
+                'total_wage_lkr': total_wage,
+                'submitted_by': user,
+            },
+        )
+
+    return {
+        'log_date': log_date,
+        'created': created_count,
+        'errors': errors,
+    }, None
+
+
 @api_view(['GET'])
 @permission_classes([IsOwnerOrManager])
 def site_logs(request, site_id):
     """GET /api/sites/:id/logs/ — combined timeline: bills + progress + attendance."""
+    site = _get_site_for_user_or_none(request.user, site_id)
+    if not site:
+        return error_response('Site not found.', {}, 404)
+
+    data = _fetch_site_progress_logs(site)
+    return success_response('Logs retrieved.', data)
+
+
+@api_view(['GET', 'POST'])
+@permission_classes([IsOwnerOrManager])
+def site_daily_logs(request, site_id):
+    """GET/POST /api/sites/:id/daily-logs/ — owner-dashboard daily log table."""
+    site = _get_site_for_user_or_none(request.user, site_id)
+    if not site:
+        return error_response('Site not found.', {}, 404)
+
+    if request.method == 'GET':
+        data = _fetch_site_progress_logs(site)
+        return success_response('Logs retrieved.', {
+            'results': data,
+            'total': len(data),
+        })
+
+    from apps.progress.serializers import ProgressLogCreateSerializer, SiteDailyLogSerializer
+
+    serializer = ProgressLogCreateSerializer(data=request.data)
+    if not serializer.is_valid():
+        return error_response('Validation failed.', serializer.errors, 422)
+
+    stage = serializer.validated_data.get('stage') or site.current_stage
+    log = serializer.save(site=site, logged_by=request.user, stage=stage)
+    return success_response('Daily log created.', SiteDailyLogSerializer(log).data, 201)
+
+
+@api_view(['GET', 'POST'])
+@permission_classes([IsOwnerOrManager])
+def site_workers(request, site_id):
+    """GET/POST /api/sites/:id/workers/ — site labour roster."""
     try:
         site = _get_sites_for_user(request.user).get(id=site_id)
     except Site.DoesNotExist:
         return error_response('Site not found.', {}, 404)
 
-    from apps.progress.models import ProgressLog
-    from apps.progress.serializers import ProgressLogSerializer
+    from apps.attendance.models import Worker
+    from apps.attendance.serializers import WorkerSerializer, WorkerCreateSerializer
 
-    logs = ProgressLog.objects.filter(site=site).order_by('-log_date')[:50]
-    return success_response('Logs retrieved.', ProgressLogSerializer(logs, many=True).data)
+    if request.method == 'POST':
+        serializer = WorkerCreateSerializer(data=request.data)
+        if not serializer.is_valid():
+            return error_response('Validation failed.', serializer.errors, 422)
+        worker = serializer.save(site=site)
+        return success_response('Worker added.', WorkerSerializer(worker).data, 201)
+
+    workers = Worker.objects.filter(site=site, is_active=True)
+    return success_response('Workers retrieved.', WorkerSerializer(workers, many=True).data)
 
 
-@api_view(['GET'])
+@api_view(['GET', 'POST'])
 @permission_classes([IsOwnerOrManager])
 def site_bills(request, site_id):
-    """GET /api/sites/:id/bills/"""
+    """GET/POST /api/sites/:id/bills/"""
     try:
         site = _get_sites_for_user(request.user).get(id=site_id)
     except Site.DoesNotExist:
         return error_response('Site not found.', {}, 404)
 
     from apps.bills.models import Bill
-    from apps.bills.serializers import BillSerializer
+    from apps.bills.serializers import SiteBillGridSerializer, BillCreateSerializer
+
+    if request.method == 'POST':
+        serializer = BillCreateSerializer(data=request.data)
+        if not serializer.is_valid():
+            return error_response('Validation failed.', serializer.errors, 422)
+        bill = serializer.save(site=site, logged_by=request.user)
+        return success_response('Bill logged.', SiteBillGridSerializer(bill).data, 201)
 
     bills = Bill.objects.filter(site=site).order_by('-log_date')
     page = int(request.query_params.get('page', 1))
     limit = int(request.query_params.get('limit', 20))
     paged, total, pages = paginate_queryset(bills, page, limit)
     return success_response('Bills retrieved.', {
-        'results': BillSerializer(paged, many=True).data,
+        'results': SiteBillGridSerializer(paged, many=True).data,
         'total': total, 'page': page, 'total_pages': pages,
     })
 
 
-@api_view(['GET'])
+@api_view(['GET', 'POST'])
 @permission_classes([IsOwnerOrManager])
 def site_attendance(request, site_id):
-    """GET /api/sites/:id/attendance/"""
+    """GET/POST /api/sites/:id/attendance/"""
     try:
         site = _get_sites_for_user(request.user).get(id=site_id)
     except Site.DoesNotExist:
         return error_response('Site not found.', {}, 404)
 
-    from apps.attendance.models import DailyAttendance
-    from apps.attendance.serializers import DailyAttendanceSerializer
+    if request.method == 'POST':
+        result, err = _submit_site_attendance(request.user, site, request.data)
+        if err:
+            return err
+        return success_response('Attendance submitted.', result, 201)
 
-    records = DailyAttendance.objects.filter(site=site).order_by('-log_date')
-    page = int(request.query_params.get('page', 1))
-    limit = int(request.query_params.get('limit', 50))
-    paged, total, pages = paginate_queryset(records, page, limit)
+    roster = _fetch_site_worker_roster(site)
     return success_response('Attendance retrieved.', {
-        'results': DailyAttendanceSerializer(paged, many=True).data,
-        'total': total, 'page': page, 'total_pages': pages,
+        'results': roster,
+        'total': len(roster),
     })
 
 
@@ -174,16 +362,11 @@ def site_attendance(request, site_id):
 @permission_classes([IsOwnerOrManager])
 def site_progress_photos(request, site_id):
     """GET /api/sites/:id/progress-photos/"""
-    try:
-        site = _get_sites_for_user(request.user).get(id=site_id)
-    except Site.DoesNotExist:
+    site = _get_site_for_user_or_none(request.user, site_id)
+    if not site:
         return error_response('Site not found.', {}, 404)
 
-    from apps.progress.models import ProgressPhoto
-    from apps.progress.serializers import ProgressPhotoSerializer
-
-    photos = ProgressPhoto.objects.filter(progress_log__site=site).order_by('-taken_at')
-    return success_response('Photos retrieved.', ProgressPhotoSerializer(photos, many=True).data)
+    return success_response('Photos retrieved.', _fetch_site_progress_photos(site))
 
 
 @api_view(['GET'])
@@ -247,13 +430,14 @@ def alert_resolve(request, site_id, alert_id):
 
 @api_view(['GET'])
 @permission_classes([IsOwnerOrManager])
-def site_daily_logs(request, site_id):
-    """GET /api/sites/:id/daily-logs/ — alias for site_logs."""
-    return site_logs(request, site_id)
-
-
-@api_view(['GET'])
-@permission_classes([IsOwnerOrManager])
 def site_photos(request, site_id):
-    """GET /api/sites/:id/photos/ — alias for site_progress_photos."""
-    return site_progress_photos(request, site_id)
+    """GET /api/sites/:id/photos/ — owner-dashboard alias for progress photos."""
+    site = _get_site_for_user_or_none(request.user, site_id)
+    if not site:
+        return error_response('Site not found.', {}, 404)
+
+    data = _fetch_site_progress_photos(site)
+    return success_response('Photos retrieved.', {
+        'results': data,
+        'total': len(data),
+    })

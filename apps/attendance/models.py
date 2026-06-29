@@ -79,16 +79,15 @@ class DailyAttendance(models.Model):
 
     def save(self, *args, **kwargs):
         """Auto-compute total_earned_lkr on every save."""
-        rate = self.daily_rate_lkr or 0
+        rate = float(self.daily_rate_lkr or 0)
         if self.status == 'present':
             base = rate
         elif self.status == 'half':
             base = rate * 0.5
         else:
             base = 0
-        # Overtime at 1.5x hourly rate (daily rate / 8 hours)
         overtime_pay = (rate / 8) * float(self.overtime_hours) * 1.5
-        self.total_earned_lkr = round(float(base) + overtime_pay, 2)
+        self.total_earned_lkr = round(base + overtime_pay, 2)
         super().save(*args, **kwargs)
 
 

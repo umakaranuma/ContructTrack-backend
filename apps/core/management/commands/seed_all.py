@@ -36,7 +36,10 @@ class Command(BaseCommand):
         self.stdout.write(self.style.SUCCESS('[OK] Workers seeded'))
 
         self._seed_logs()
-        self.stdout.write(self.style.SUCCESS('[OK] Sample logs seeded'))
+        self.stdout.write(self.style.SUCCESS('[OK] Sample bills & payments seeded'))
+
+        self._seed_site_activity()
+        self.stdout.write(self.style.SUCCESS('[OK] Site activity seeded (logs, attendance, photos, alerts)'))
 
         self.stdout.write('\n' + self.style.SUCCESS('All seed data loaded successfully.'))
 
@@ -385,31 +388,24 @@ class Command(BaseCommand):
         from apps.sites.models import Site
         from apps.attendance.models import Worker
 
-        try:
-            site = Site.objects.get(name='Colombo Site A — Commercial Tower')
-        except Site.DoesNotExist:
-            self.stdout.write(self.style.WARNING('Colombo Site A not found; skipping workers.'))
-            return
-
-        workers = [
-            {'full_name': 'Roshan Silva',      'role': 'mason',      'daily_rate_lkr': 4500},
-            {'full_name': 'Anura Dissanayake', 'role': 'mason',      'daily_rate_lkr': 4500},
-            {'full_name': 'Sampath Kodikara',  'role': 'helper',     'daily_rate_lkr': 3200},
-            {'full_name': 'Thilina Rajapaksa', 'role': 'helper',     'daily_rate_lkr': 3200},
-            {'full_name': 'Mahinda Kurera',    'role': 'bar_bender', 'daily_rate_lkr': 4800},
-            {'full_name': 'Chamara Wijesinghe','role': 'carpenter',  'daily_rate_lkr': 4500},
-            {'full_name': 'Lasith Madushanka', 'role': 'operator',   'daily_rate_lkr': 5500},
-            {'full_name': 'Nuwan Pradeep',     'role': 'labourer',   'daily_rate_lkr': 2800},
-            {'full_name': 'Dimuthu Siriwardena','role': 'labourer',  'daily_rate_lkr': 2800},
-            {'full_name': 'Kasun Pathirana',   'role': 'labourer',   'daily_rate_lkr': 2800},
+        roster_templates = [
+            {'full_name': 'Roshan Silva',       'role': 'mason',      'daily_rate_lkr': 4500},
+            {'full_name': 'Anura Dissanayake',  'role': 'mason',      'daily_rate_lkr': 4500},
+            {'full_name': 'Sampath Kodikara',   'role': 'helper',     'daily_rate_lkr': 3200},
+            {'full_name': 'Thilina Rajapaksa',  'role': 'helper',     'daily_rate_lkr': 3200},
+            {'full_name': 'Mahinda Kurera',     'role': 'bar_bender', 'daily_rate_lkr': 4800},
+            {'full_name': 'Chamara Wijesinghe', 'role': 'carpenter',  'daily_rate_lkr': 4500},
+            {'full_name': 'Lasith Madushanka',  'role': 'operator',   'daily_rate_lkr': 5500},
+            {'full_name': 'Nuwan Pradeep',      'role': 'labourer',   'daily_rate_lkr': 2800},
         ]
 
-        for w in workers:
-            Worker.objects.get_or_create(
-                site=site,
-                full_name=w['full_name'],
-                defaults={**w, 'contract_type': 'daily', 'is_active': True},
-            )
+        for site in Site.objects.filter(is_active=True):
+            for w in roster_templates[:6 if site.project_type == 'residential' else 8]:
+                Worker.objects.get_or_create(
+                    site=site,
+                    full_name=w['full_name'],
+                    defaults={**w, 'contract_type': 'daily', 'is_active': True},
+                )
 
     # -------------------------------------------------------------------------
     # Sample Bills & Payments
@@ -442,6 +438,7 @@ class Command(BaseCommand):
                 'payment_method': 'credit',
                 'purpose': 'columns',
                 'log_date': date(2025, 6, 17),
+                'bill_photo_url': 'https://placehold.co/400x300/112240/C9A84C?text=Cement+Bill',
             },
             {
                 'site': colombo_a,
@@ -455,6 +452,7 @@ class Command(BaseCommand):
                 'payment_method': 'bank_transfer',
                 'purpose': 'columns',
                 'log_date': date(2025, 6, 17),
+                'bill_photo_url': 'https://placehold.co/400x300/112240/C9A84C?text=Steel+Bill',
             },
             {
                 'site': kandy_b,
@@ -466,8 +464,9 @@ class Command(BaseCommand):
                 'unit_price_lkr': 18000,
                 'total_amount_lkr': 90000,
                 'payment_method': 'cash',
-                'purpose': 'upper_slab',
+                'purpose': 'slab',
                 'log_date': date(2025, 6, 17),
+                'bill_photo_url': 'https://placehold.co/400x300/112240/C9A84C?text=Sand+Bill',
             },
         ]
 
@@ -517,3 +516,147 @@ class Command(BaseCommand):
                 gateway_ref=p.get('gateway_ref'),
                 defaults=p,
             )
+
+    # -------------------------------------------------------------------------
+    # Progress logs, attendance, photos, alerts (all active sites)
+    # -------------------------------------------------------------------------
+    def _seed_site_activity(self):
+        from apps.accounts.models import User
+        from apps.sites.models import Site, SiteManager, Alert
+        from apps.bills.models import Bill
+        from apps.attendance.models import Worker, DailyAttendance, AttendanceSummary
+        from apps.progress.models import ProgressLog, ProgressPhoto
+        from django.utils import timezone as tz
+
+        today = date.today()
+        bill_suppliers = [
+            ('Holcim Lanka', 'cement', 40, 'bags', 2480, 'cash', 'foundation'),
+            ('Steel Corp PLC', 'steel', 300, 'kg', 340, 'bank_transfer', 'columns'),
+            ('Mahaweli Sand', 'sand', 3, 'loads', 18500, 'cash', 'slab'),
+            ('Lanka Tiles', 'tiles', 120, 'sqft', 560, 'credit', 'finishing'),
+            ('Lanka Paint', 'paint', 25, 'litres', 3200, 'cash', 'finishing'),
+        ]
+        work_notes = [
+            'Column reinforcement and shuttering completed on north wing.',
+            'Slab concrete pour — west section. Curing started.',
+            'Brickwork progress on ground floor east block.',
+            'Electrical conduit installation — level 2.',
+            'Foundation waterproofing and backfill.',
+            'Steel rod binding for beam grid B2.',
+            'Site cleanup and material stocktake.',
+        ]
+        photo_captions = [
+            'Slab reinforcement complete', 'Column pour north face',
+            'General site overview', 'Foundation waterproofing',
+            'Steel rod binding grid', 'Brickwork east block',
+        ]
+
+        for site in Site.objects.filter(is_active=True):
+            manager = SiteManager.objects.filter(site=site, is_active=True).select_related('manager').first()
+            logged_by = manager.manager if manager else User.objects.filter(user_type='owner').first()
+            workers = list(Worker.objects.filter(site=site, is_active=True))
+
+            for day_offset in range(7):
+                log_date = today - timedelta(days=day_offset)
+                sup, mat, qty, unit, price, pay, purpose = bill_suppliers[day_offset % len(bill_suppliers)]
+                amount = qty * price
+
+                Bill.objects.get_or_create(
+                    site=site,
+                    supplier_name=sup,
+                    log_date=log_date,
+                    defaults={
+                        'logged_by': logged_by,
+                        'material_type': mat,
+                        'quantity': qty,
+                        'unit': unit,
+                        'unit_price_lkr': price,
+                        'total_amount_lkr': amount,
+                        'payment_method': pay,
+                        'purpose': purpose,
+                        'bill_photo_url': f'https://placehold.co/400x300/112240/C9A84C?text={mat.title()}+Bill',
+                    },
+                )
+
+                log, _ = ProgressLog.objects.get_or_create(
+                    site=site,
+                    log_date=log_date,
+                    defaults={
+                        'logged_by': logged_by,
+                        'stage': site.current_stage,
+                        'work_done_today': work_notes[day_offset % len(work_notes)],
+                        'tomorrow_status': 'working',
+                    },
+                )
+
+                for cap_idx, caption in enumerate(photo_captions[:2 + (day_offset % 2)]):
+                    taken = tz.now().replace(
+                        year=log_date.year, month=log_date.month, day=log_date.day,
+                        hour=8 + cap_idx * 2, minute=15,
+                    )
+                    ProgressPhoto.objects.get_or_create(
+                        progress_log=log,
+                        caption=caption,
+                        defaults={
+                            'photo_url': f'https://placehold.co/600x400/0A1628/C9A84C?text={caption[:20].replace(" ", "+")}',
+                            'gps_lat': 6.9271 + cap_idx * 0.0001,
+                            'gps_lng': 79.8612 + cap_idx * 0.0001,
+                            'taken_at': taken,
+                        },
+                    )
+
+                if not workers:
+                    continue
+
+                present = max(1, len(workers) - (day_offset % 3))
+                total_wage = 0
+                for idx, worker in enumerate(workers):
+                    if idx < present:
+                        status = 'present'
+                    elif idx == present:
+                        status = 'half'
+                    else:
+                        status = 'absent'
+                    att, _ = DailyAttendance.objects.update_or_create(
+                        site=site,
+                        worker=worker,
+                        log_date=log_date,
+                        defaults={
+                            'status': status,
+                            'overtime_hours': 1 if status == 'present' and idx == 0 else 0,
+                            'daily_rate_lkr': worker.daily_rate_lkr,
+                            'logged_by': logged_by,
+                            'is_paid': day_offset > 2 and status != 'absent',
+                            'is_synced': True,
+                        },
+                    )
+                    if status != 'absent':
+                        total_wage += float(att.total_earned_lkr)
+
+                day_recs = DailyAttendance.objects.filter(site=site, log_date=log_date)
+                AttendanceSummary.objects.update_or_create(
+                    site=site,
+                    log_date=log_date,
+                    defaults={
+                        'total_present': day_recs.filter(status='present').count(),
+                        'total_half': day_recs.filter(status='half').count(),
+                        'total_absent': day_recs.filter(status='absent').count(),
+                        'total_wage_lkr': total_wage,
+                        'submitted_by': logged_by,
+                    },
+                )
+
+            if site.name.startswith('Colombo'):
+                Alert.objects.get_or_create(
+                    site=site,
+                    alert_type='missing_log',
+                    message='End-of-day progress log not submitted before 6 PM yesterday.',
+                    defaults={'is_resolved': False},
+                )
+            elif site.name.startswith('Galle'):
+                Alert.objects.get_or_create(
+                    site=site,
+                    alert_type='anomaly',
+                    message='A cement delivery bill exceeds the weekly average by 40%.',
+                    defaults={'is_resolved': False},
+                )

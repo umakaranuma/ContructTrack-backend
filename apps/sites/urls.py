@@ -9,6 +9,7 @@ urlpatterns = [
     path('<uuid:site_id>/logs/', views.site_logs, name='site-logs'),
     path('<uuid:site_id>/daily-logs/', views.site_daily_logs, name='site-daily-logs'),  # frontend alias
     path('<uuid:site_id>/bills/', views.site_bills, name='site-bills'),
+    path('<uuid:site_id>/workers/', views.site_workers, name='site-workers'),
     path('<uuid:site_id>/attendance/', views.site_attendance, name='site-attendance'),
     path('<uuid:site_id>/progress-photos/', views.site_progress_photos, name='site-photos-full'),
     path('<uuid:site_id>/photos/', views.site_photos, name='site-photos'),  # frontend alias
