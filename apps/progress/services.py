@@ -41,6 +41,7 @@ def fetch_daily_log_detail(site, log):
             'role': rec.worker.role,
             'status': rec.status,
             'overtime_hours': rec.overtime_hours,
+            'daily_rate_lkr': rec.daily_rate_lkr,
             'total_earned_lkr': rec.total_earned_lkr,
             'is_paid': rec.is_paid,
         }

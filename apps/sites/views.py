@@ -189,6 +189,9 @@ def _submit_site_attendance(user, site, data):
                 errors.append(f'Worker {worker_id} not found.')
                 continue
 
+            from apps.attendance.services import resolve_attendance_rate
+            rate_lkr = resolve_attendance_rate(worker, rec)
+
             _, created = DailyAttendance.objects.update_or_create(
                 site=site,
                 worker=worker,
@@ -196,7 +199,7 @@ def _submit_site_attendance(user, site, data):
                 defaults={
                     'status': rec.get('status', 'present'),
                     'overtime_hours': rec.get('overtime_hours', 0),
-                    'daily_rate_lkr': worker.daily_rate_lkr,
+                    'daily_rate_lkr': rate_lkr,
                     'logged_by': user,
                     'is_rain_day': is_rain_day,
                     'is_synced': True,

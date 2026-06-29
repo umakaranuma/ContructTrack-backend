@@ -201,6 +201,9 @@ def mobile_attendance(request, site_id):
                 errors.append(f'Worker {worker_id} not found.')
                 continue
 
+            from apps.attendance.services import resolve_attendance_rate
+            rate_lkr = resolve_attendance_rate(worker, rec)
+
             att, created = DailyAttendance.objects.update_or_create(
                 site=site,
                 worker=worker,
@@ -208,7 +211,7 @@ def mobile_attendance(request, site_id):
                 defaults={
                     'status': rec.get('status', 'present'),
                     'overtime_hours': rec.get('overtime_hours', 0),
-                    'daily_rate_lkr': worker.daily_rate_lkr,  # snapshot current rate
+                    'daily_rate_lkr': rate_lkr,
                     'logged_by': request.user,
                     'is_rain_day': is_rain_day,
                     'is_synced': True,

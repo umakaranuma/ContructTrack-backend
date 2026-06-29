@@ -9,6 +9,7 @@ class DailyLogAttendanceRowSerializer(serializers.Serializer):
     role = serializers.CharField()
     status = serializers.CharField()
     overtime_hours = serializers.DecimalField(max_digits=4, decimal_places=1)
+    daily_rate_lkr = serializers.DecimalField(max_digits=10, decimal_places=2)
     total_earned_lkr = serializers.DecimalField(max_digits=12, decimal_places=2)
     is_paid = serializers.BooleanField()
 
