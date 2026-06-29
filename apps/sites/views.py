@@ -118,34 +118,16 @@ def _get_site_for_user_or_none(user, site_id):
 
 
 def _fetch_site_progress_logs(site, limit=50, log_date=None):
-    from collections import Counter
     from apps.progress.models import ProgressLog
     from apps.progress.serializers import SiteDailyLogSerializer
-    from apps.bills.models import Bill
-    from apps.attendance.models import AttendanceSummary
 
     qs = ProgressLog.objects.filter(site=site).select_related('logged_by').order_by('-log_date')
     if log_date:
         qs = qs.filter(log_date=log_date)
     logs = list(qs[:limit])
-
     if not logs:
         return []
-
-    log_dates = [log.log_date for log in logs]
-    bills_by_date = Counter(
-        Bill.objects.filter(site=site, log_date__in=log_dates).values_list('log_date', flat=True)
-    )
-    attendance_by_date = {
-        s.log_date: s
-        for s in AttendanceSummary.objects.filter(site=site, log_date__in=log_dates)
-    }
-
-    return SiteDailyLogSerializer(
-        logs,
-        many=True,
-        context={'bills_by_date': bills_by_date, 'attendance_by_date': attendance_by_date},
-    ).data
+    return SiteDailyLogSerializer(logs, many=True).data
 
 
 def _fetch_site_progress_photos(site):
@@ -283,6 +265,25 @@ def site_daily_logs(request, site_id):
     log, created = upsert_progress_log(site, request.user, serializer.validated_data)
     message = 'Daily log created.' if created else 'Daily log updated for this date.'
     return success_response(message, serialize_site_daily_log(site, log), 201 if created else 200)
+
+
+@api_view(['GET'])
+@permission_classes([IsOwnerOrManager])
+def site_daily_log_detail(request, site_id, log_id):
+    """GET /api/sites/:id/daily-logs/:logId/ — full day view with attendance, bills, photos."""
+    site = _get_site_for_user_or_none(request.user, site_id)
+    if not site:
+        return error_response('Site not found.', {}, 404)
+
+    from apps.progress.models import ProgressLog
+    from apps.progress.services import fetch_daily_log_detail
+
+    try:
+        log = ProgressLog.objects.select_related('logged_by').get(id=log_id, site=site)
+    except ProgressLog.DoesNotExist:
+        return error_response('Daily log not found.', {}, 404)
+
+    return success_response('Daily log retrieved.', fetch_daily_log_detail(site, log))
 
 
 @api_view(['GET', 'POST'])

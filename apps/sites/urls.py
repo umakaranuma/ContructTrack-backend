@@ -8,6 +8,7 @@ urlpatterns = [
     # Sub-resources
     path('<uuid:site_id>/logs/', views.site_logs, name='site-logs'),
     path('<uuid:site_id>/daily-logs/', views.site_daily_logs, name='site-daily-logs'),  # frontend alias
+    path('<uuid:site_id>/daily-logs/<uuid:log_id>/', views.site_daily_log_detail, name='site-daily-log-detail'),
     path('<uuid:site_id>/bills/', views.site_bills, name='site-bills'),
     path('<uuid:site_id>/workers/', views.site_workers, name='site-workers'),
     path('<uuid:site_id>/attendance/', views.site_attendance, name='site-attendance'),
