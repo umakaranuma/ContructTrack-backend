@@ -17,6 +17,25 @@ from .tasks import generate_report_task
 logger = logging.getLogger(__name__)
 
 
+@api_view(['GET'])
+@permission_classes([IsOwner])
+def list_reports(request):
+    """GET /api/reports/ — list previously generated reports for this tenant."""
+    tenant = Tenant.objects.filter(owner=request.user).first()
+    if not tenant:
+        return error_response('Tenant not found.', {}, 404)
+
+    from apps.core.utils import paginate_queryset
+    reports = Report.objects.filter(tenant=tenant).order_by('-created_at')
+    page  = int(request.query_params.get('page', 1))
+    limit = int(request.query_params.get('limit', 20))
+    paged, total, pages = paginate_queryset(reports, page, limit)
+    return success_response('Reports retrieved.', {
+        'results': ReportSerializer(paged, many=True).data,
+        'total': total, 'page': page, 'total_pages': pages,
+    })
+
+
 @api_view(['POST'])
 @permission_classes([IsOwner])
 def generate_report(request):

@@ -54,11 +54,49 @@ def finance_summary(request):
             pass
     total_wages = wages_qs.aggregate(total=Sum('total_earned_lkr'))['total'] or 0
 
+    # Prev-month comparison for change indicators
+    if month_str:
+        try:
+            y, m = int(year), int(month)
+            prev_y, prev_m = (y - 1, 12) if m == 1 else (y, m - 1)
+            prev_mat = Bill.objects.filter(
+                site_id__in=site_ids, log_date__year=prev_y, log_date__month=prev_m
+            ).aggregate(t=Sum('total_amount_lkr'))['t'] or 0
+            from apps.attendance.models import DailyAttendance as _DA
+            prev_wag = _DA.objects.filter(
+                site_id__in=site_ids, log_date__year=prev_y, log_date__month=prev_m
+            ).aggregate(t=Sum('total_earned_lkr'))['t'] or 0
+        except Exception:
+            prev_mat, prev_wag = 0, 0
+    else:
+        prev_mat, prev_wag = 0, 0
+
+    def _pct_change(current, prev):
+        if not prev:
+            return '+0%'
+        diff = ((float(current) - float(prev)) / float(prev)) * 100
+        return f"{'+' if diff >= 0 else ''}{diff:.0f}%"
+
+    prev_total = float(prev_mat) + float(prev_wag)
+    total_mat  = float(total_materials)
+    total_wag  = float(total_wages)
+
+    active_sites = Site.objects.filter(tenant=tenant, is_active=True).count()
+
     return success_response('Finance summary.', {
-        'month': month_str,
-        'total_material_spend_lkr': float(total_materials),
-        'total_wage_spend_lkr': float(total_wages),
-        'total_spend_lkr': float(total_materials) + float(total_wages),
+        'month':                 month_str,
+        # Field names match the frontend Finances.jsx component expectations
+        'total_material_spend':  total_mat,
+        'total_wage_payout':     total_wag,
+        'total_site_spend':      total_mat + total_wag,
+        'active_sites':          active_sites,
+        'vs_prev_material':      _pct_change(total_mat, prev_mat),
+        'vs_prev_wages':         _pct_change(total_wag, prev_wag),
+        'vs_prev_total':         _pct_change(total_mat + total_wag, prev_total),
+        # Also keep lkr-suffixed names for backward compatibility
+        'total_material_spend_lkr': total_mat,
+        'total_wage_spend_lkr':     total_wag,
+        'total_spend_lkr':          total_mat + total_wag,
     })
 
 

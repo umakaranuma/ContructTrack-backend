@@ -392,6 +392,187 @@ def remove_manager_from_site(request, manager_id, site_id):
     return success_response('Manager removed from site.')
 
 
+@api_view(['GET', 'DELETE'])
+@permission_classes([IsOwner])
+def get_manager(request, manager_id):
+    """
+    GET    /api/managers/:id/ — detail view for a single manager
+    DELETE /api/managers/:id/ — remove manager from all tenant sites
+    """
+    try:
+        manager = User.objects.get(id=manager_id, user_type='manager')
+    except User.DoesNotExist:
+        return error_response('Manager not found.', {}, 404)
+
+    if request.method == 'DELETE':
+        from apps.tenants.models import Tenant
+        from apps.sites.models import SiteManager
+        from django.utils import timezone as tz
+
+        tenant = Tenant.objects.filter(owner=request.user).first()
+        if tenant:
+            SiteManager.objects.filter(
+                manager=manager, site__tenant=tenant, is_active=True,
+            ).update(is_active=False, removed_at=tz.now())
+        return success_response('Manager removed from all sites.')
+
+    return success_response('Manager retrieved.', ManagerListSerializer(manager).data)
+
+
+@api_view(['GET'])
+@permission_classes([IsOwner])
+def lookup_manager(request):
+    """
+    GET /api/managers/lookup/?ref_code=MGR-1234  — lookup by reference code
+    GET /api/managers/lookup/?email=x@y.com      — lookup by email
+    Unified endpoint matching what the frontend services call.
+    """
+    ref_code = request.query_params.get('ref_code', '').strip().upper()
+    email    = request.query_params.get('email', '').strip().lower()
+
+    if ref_code:
+        try:
+            manager = User.objects.get(reference_code=ref_code, user_type='manager')
+        except User.DoesNotExist:
+            return error_response('No manager found with that reference code.', {}, 404)
+        return success_response('Manager found.', ManagerListSerializer(manager).data)
+
+    if email:
+        managers = User.objects.filter(email__icontains=email, user_type='manager')
+        return success_response('Search results.', ManagerListSerializer(managers, many=True).data)
+
+    return error_response('Provide ref_code or email query parameter.', {}, 400)
+
+
+@api_view(['POST'])
+@permission_classes([IsOwner])
+def add_manager(request):
+    """
+    POST /api/managers/add/
+    Adds an existing manager to the owner's tenant by assigning them to one or more sites.
+    Body: { manager_id: uuid, site_ids: [uuid, ...] }
+    """
+    from apps.tenants.models import Tenant
+    from apps.sites.models import Site, SiteManager
+
+    tenant = Tenant.objects.filter(owner=request.user).first()
+    if not tenant:
+        return error_response('Tenant not found.', {}, 404)
+
+    manager_id = request.data.get('manager_id')
+    site_ids   = request.data.get('site_ids', [])
+
+    if not manager_id:
+        return error_response('manager_id is required.', {}, 400)
+
+    try:
+        manager = User.objects.get(id=manager_id, user_type='manager')
+    except User.DoesNotExist:
+        return error_response('Manager not found.', {}, 404)
+
+    assigned = []
+    for sid in site_ids:
+        try:
+            site = Site.objects.get(id=sid, tenant=tenant)
+            assignment, _ = SiteManager.objects.get_or_create(
+                site=site, manager=manager, defaults={'is_active': True}
+            )
+            assignment.is_active = True
+            assignment.removed_at = None
+            assignment.save()
+            assigned.append(str(site.id))
+        except Site.DoesNotExist:
+            pass
+
+    return success_response('Manager added.', {
+        'manager_id': str(manager.id),
+        'assigned_sites': assigned,
+    }, 201)
+
+
+@api_view(['POST'])
+@permission_classes([IsOwner])
+def unassign_manager(request, manager_id):
+    """
+    POST /api/managers/:id/unassign/
+    Body: { site_id: uuid }
+    Removes a manager assignment from one site.
+    """
+    from apps.tenants.models import Tenant
+    from apps.sites.models import SiteManager
+    from django.utils import timezone as tz
+
+    tenant = Tenant.objects.filter(owner=request.user).first()
+    if not tenant:
+        return error_response('Tenant not found.', {}, 404)
+
+    site_id = request.data.get('site_id')
+    if not site_id:
+        return error_response('site_id is required.', {}, 400)
+
+    updated = SiteManager.objects.filter(
+        manager_id=manager_id,
+        site_id=site_id,
+        site__tenant=tenant,
+        is_active=True,
+    ).update(is_active=False, removed_at=tz.now())
+
+    if not updated:
+        return error_response('Assignment not found.', {}, 404)
+
+    return success_response('Manager removed from site.')
+
+
+@api_view(['DELETE'])
+@permission_classes([IsOwner])
+def remove_manager(request, manager_id):
+    """
+    DELETE /api/managers/:id/
+    Removes the manager from ALL sites under this tenant (soft-delete assignments).
+    Does not delete the manager user account.
+    """
+    from apps.tenants.models import Tenant
+    from apps.sites.models import SiteManager
+    from django.utils import timezone as tz
+
+    tenant = Tenant.objects.filter(owner=request.user).first()
+    if not tenant:
+        return error_response('Tenant not found.', {}, 404)
+
+    SiteManager.objects.filter(
+        manager_id=manager_id,
+        site__tenant=tenant,
+        is_active=True,
+    ).update(is_active=False, removed_at=tz.now())
+
+    return success_response('Manager removed from all sites.')
+
+
+@api_view(['GET'])
+@permission_classes([IsOwner])
+def manager_activity(request, manager_id):
+    """GET /api/managers/:id/activity/ — recent activity log for a manager."""
+    from apps.sites.models import SiteManager
+    from apps.progress.models import ProgressLog
+    from apps.progress.serializers import ProgressLogSerializer
+
+    try:
+        manager = User.objects.get(id=manager_id, user_type='manager')
+    except User.DoesNotExist:
+        return error_response('Manager not found.', {}, 404)
+
+    assigned_site_ids = SiteManager.objects.filter(
+        manager=manager, is_active=True
+    ).values_list('site_id', flat=True)
+
+    logs = ProgressLog.objects.filter(
+        site_id__in=assigned_site_ids,
+        logged_by=manager,
+    ).order_by('-log_date')[:30]
+
+    return success_response('Activity retrieved.', ProgressLogSerializer(logs, many=True).data)
+
+
 @api_view(['PATCH'])
 @permission_classes([IsOwner])
 def deactivate_manager(request, manager_id):
@@ -404,3 +585,27 @@ def deactivate_manager(request, manager_id):
     manager.is_active = False
     manager.save(update_fields=['is_active'])
     return success_response('Manager deactivated.')
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def change_password(request):
+    """
+    POST /api/auth/change-password/
+    Body: { current_password, new_password }
+    """
+    current  = request.data.get('current_password', '')
+    new_pwd  = request.data.get('new_password', '')
+
+    if not current or not new_pwd:
+        return error_response('current_password and new_password are required.', {}, 400)
+
+    if len(new_pwd) < 8:
+        return error_response('New password must be at least 8 characters.', {}, 400)
+
+    if not request.user.check_password(current):
+        return error_response('Current password is incorrect.', {}, 400)
+
+    request.user.set_password(new_pwd)
+    request.user.save(update_fields=['password'])
+    return success_response('Password changed successfully.')

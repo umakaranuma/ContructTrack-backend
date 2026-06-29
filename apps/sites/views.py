@@ -189,3 +189,63 @@ def site_alerts(request, site_id):
 
     alerts = Alert.objects.filter(site=site, is_resolved=False).order_by('-created_at')
     return success_response('Alerts retrieved.', AlertSerializer(alerts, many=True).data)
+
+
+@api_view(['POST'])
+@permission_classes([IsOwnerOrManager])
+def alert_acknowledge(request, site_id, alert_id):
+    """
+    POST /api/sites/:id/alerts/:alertId/acknowledge/
+    Marks the alert as resolved (model has no separate acknowledged state).
+    """
+    try:
+        site = _get_sites_for_user(request.user).get(id=site_id)
+    except Site.DoesNotExist:
+        return error_response('Site not found.', {}, 404)
+
+    try:
+        alert = Alert.objects.get(id=alert_id, site=site)
+    except Alert.DoesNotExist:
+        return error_response('Alert not found.', {}, 404)
+
+    # Treat acknowledge as soft-resolved so frontend hides the action buttons
+    alert.is_resolved = True
+    alert.resolved_at = timezone.now()
+    alert.resolved_by = request.user
+    alert.save(update_fields=['is_resolved', 'resolved_at', 'resolved_by'])
+    return success_response('Alert acknowledged.', AlertSerializer(alert).data)
+
+
+@api_view(['POST'])
+@permission_classes([IsOwnerOrManager])
+def alert_resolve(request, site_id, alert_id):
+    """POST /api/sites/:id/alerts/:alertId/resolve/"""
+    try:
+        site = _get_sites_for_user(request.user).get(id=site_id)
+    except Site.DoesNotExist:
+        return error_response('Site not found.', {}, 404)
+
+    try:
+        alert = Alert.objects.get(id=alert_id, site=site)
+    except Alert.DoesNotExist:
+        return error_response('Alert not found.', {}, 404)
+
+    alert.is_resolved = True
+    alert.resolved_at = timezone.now()
+    alert.resolved_by = request.user
+    alert.save(update_fields=['is_resolved', 'resolved_at', 'resolved_by'])
+    return success_response('Alert resolved.', AlertSerializer(alert).data)
+
+
+@api_view(['GET'])
+@permission_classes([IsOwnerOrManager])
+def site_daily_logs(request, site_id):
+    """GET /api/sites/:id/daily-logs/ — alias for site_logs."""
+    return site_logs(request, site_id)
+
+
+@api_view(['GET'])
+@permission_classes([IsOwnerOrManager])
+def site_photos(request, site_id):
+    """GET /api/sites/:id/photos/ — alias for site_progress_photos."""
+    return site_progress_photos(request, site_id)

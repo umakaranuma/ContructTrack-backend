@@ -9,6 +9,9 @@ urlpatterns = [
     # Authentication — login, register, JWT refresh, profile
     path('api/auth/', include('apps.accounts.urls')),
 
+    # Owner dashboard overview endpoints
+    path('api/dashboard/', include('apps.core.urls_dashboard')),
+
     # Public package listing (no auth required)
     path('api/packages/', include('apps.tenants.urls_packages')),
 
