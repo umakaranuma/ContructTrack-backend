@@ -136,3 +136,99 @@ class ManagerListSerializer(serializers.ModelSerializer):
         if obj.is_suspended:
             return 'suspended'
         return 'active' if obj.is_active else 'inactive'
+
+
+class ManagerDetailSerializer(serializers.ModelSerializer):
+    """Full manager profile for the owner dashboard detail page."""
+    name = serializers.CharField(source='full_name', read_only=True)
+    ref_code = serializers.CharField(source='reference_code', read_only=True)
+    status = serializers.SerializerMethodField()
+    last_active = serializers.SerializerMethodField()
+    assigned_sites = serializers.SerializerMethodField()
+    experience = serializers.SerializerMethodField()
+
+    class Meta:
+        model = User
+        fields = [
+            'id', 'full_name', 'name', 'email', 'phone', 'nic',
+            'reference_code', 'ref_code', 'profile_photo_url',
+            'is_active', 'is_suspended', 'status', 'last_active',
+            'assigned_sites', 'experience', 'created_at',
+        ]
+
+    def _tenant_site_ids(self, obj):
+        tenant = self.context.get('tenant')
+        from apps.sites.models import SiteManager
+        qs = SiteManager.objects.filter(manager=obj, is_active=True)
+        if tenant:
+            qs = qs.filter(site__tenant=tenant)
+        return list(qs.values_list('site_id', flat=True))
+
+    def get_assigned_sites(self, obj):
+        from apps.sites.models import SiteManager
+        tenant = self.context.get('tenant')
+        qs = SiteManager.objects.filter(manager=obj, is_active=True).select_related('site')
+        if tenant:
+            qs = qs.filter(site__tenant=tenant)
+        return [
+            {
+                'id': str(sm.site.id),
+                'name': sm.site.name,
+                'location': sm.site.address or '',
+                'stage': sm.site.current_stage,
+                'status': 'active' if sm.site.is_active else 'inactive',
+                'assigned_at': sm.assigned_at.isoformat() if sm.assigned_at else None,
+            }
+            for sm in qs
+        ]
+
+    def get_last_active(self, obj):
+        from apps.progress.models import ProgressLog
+        site_ids = self._tenant_site_ids(obj)
+        log = ProgressLog.objects.filter(
+            logged_by=obj, site_id__in=site_ids,
+        ).order_by('-created_at').first()
+        if log:
+            return log.created_at.isoformat()
+        if obj.last_login:
+            return obj.last_login.isoformat()
+        return obj.created_at.isoformat()
+
+    def get_status(self, obj):
+        if obj.is_suspended:
+            return 'suspended'
+        return 'active' if obj.is_active else 'inactive'
+
+    def get_experience(self, obj):
+        from django.utils import timezone
+        from apps.progress.models import ProgressLog
+        from apps.bills.models import Bill
+        from apps.attendance.models import AttendanceSummary
+
+        site_ids = self._tenant_site_ids(obj)
+        if not site_ids:
+            days = (timezone.now() - obj.created_at).days
+            return {
+                'member_since': obj.created_at.date().isoformat(),
+                'days_as_manager': days,
+                'total_sites': 0,
+                'total_progress_logs': 0,
+                'total_bills_logged': 0,
+                'total_attendance_submissions': 0,
+            }
+
+        total_logs = ProgressLog.objects.filter(logged_by=obj, site_id__in=site_ids).count()
+        total_bills = Bill.objects.filter(logged_by=obj, site_id__in=site_ids).count()
+        total_attendance = AttendanceSummary.objects.filter(
+            submitted_by=obj, site_id__in=site_ids,
+        ).count()
+        days = (timezone.now() - obj.created_at).days
+
+        return {
+            'member_since': obj.created_at.date().isoformat(),
+            'days_as_manager': days,
+            'total_sites': len(site_ids),
+            'total_progress_logs': total_logs,
+            'total_bills_logged': total_bills,
+            'total_attendance_submissions': total_attendance,
+        }

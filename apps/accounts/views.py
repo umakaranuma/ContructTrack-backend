@@ -20,6 +20,7 @@ from .serializers import (
     UserProfileSerializer,
     UserUpdateSerializer,
     ManagerListSerializer,
+    ManagerDetailSerializer,
 )
 
 logger = logging.getLogger(__name__)
@@ -392,6 +393,20 @@ def remove_manager_from_site(request, manager_id, site_id):
     return success_response('Manager removed from site.')
 
 
+def _get_owner_tenant(user):
+    from apps.tenants.models import Tenant
+    return Tenant.objects.filter(owner=user).first()
+
+
+def _manager_in_tenant(manager, tenant):
+    if not tenant:
+        return False
+    from apps.sites.models import SiteManager
+    return SiteManager.objects.filter(
+        manager=manager, site__tenant=tenant, is_active=True,
+    ).exists()
+
+
 @api_view(['GET', 'DELETE'])
 @permission_classes([IsOwner])
 def get_manager(request, manager_id):
@@ -404,19 +419,25 @@ def get_manager(request, manager_id):
     except User.DoesNotExist:
         return error_response('Manager not found.', {}, 404)
 
+    tenant = _get_owner_tenant(request.user)
+    if not tenant:
+        return error_response('Tenant not found.', {}, 404)
+    if not _manager_in_tenant(manager, tenant):
+        return error_response('Manager not found.', {}, 404)
+
     if request.method == 'DELETE':
-        from apps.tenants.models import Tenant
         from apps.sites.models import SiteManager
         from django.utils import timezone as tz
 
-        tenant = Tenant.objects.filter(owner=request.user).first()
-        if tenant:
-            SiteManager.objects.filter(
-                manager=manager, site__tenant=tenant, is_active=True,
-            ).update(is_active=False, removed_at=tz.now())
+        SiteManager.objects.filter(
+            manager=manager, site__tenant=tenant, is_active=True,
+        ).update(is_active=False, removed_at=tz.now())
         return success_response('Manager removed from all sites.')
 
-    return success_response('Manager retrieved.', ManagerListSerializer(manager).data)
+    return success_response(
+        'Manager retrieved.',
+        ManagerDetailSerializer(manager, context={'tenant': tenant}).data,
+    )
 
 
 @api_view(['GET'])
@@ -551,26 +572,69 @@ def remove_manager(request, manager_id):
 @api_view(['GET'])
 @permission_classes([IsOwner])
 def manager_activity(request, manager_id):
-    """GET /api/managers/:id/activity/ — recent activity log for a manager."""
+    """GET /api/managers/:id/activity/ — unified recent activity for a manager."""
     from apps.sites.models import SiteManager
     from apps.progress.models import ProgressLog
-    from apps.progress.serializers import ProgressLogSerializer
+    from apps.bills.models import Bill
+    from apps.attendance.models import AttendanceSummary
 
     try:
         manager = User.objects.get(id=manager_id, user_type='manager')
     except User.DoesNotExist:
         return error_response('Manager not found.', {}, 404)
 
-    assigned_site_ids = SiteManager.objects.filter(
-        manager=manager, is_active=True
-    ).values_list('site_id', flat=True)
+    tenant = _get_owner_tenant(request.user)
+    if not tenant or not _manager_in_tenant(manager, tenant):
+        return error_response('Manager not found.', {}, 404)
 
-    logs = ProgressLog.objects.filter(
-        site_id__in=assigned_site_ids,
-        logged_by=manager,
-    ).order_by('-log_date')[:30]
+    assigned_site_ids = list(
+        SiteManager.objects.filter(
+            manager=manager, site__tenant=tenant, is_active=True,
+        ).values_list('site_id', flat=True)
+    )
 
-    return success_response('Activity retrieved.', ProgressLogSerializer(logs, many=True).data)
+    activities = []
+
+    for log in ProgressLog.objects.filter(
+        site_id__in=assigned_site_ids, logged_by=manager,
+    ).select_related('site').order_by('-created_at')[:20]:
+        summary = (log.work_done_today or 'Progress update')[:120]
+        activities.append({
+            'id': f'log-{log.id}',
+            'type': 'progress_log',
+            'site_id': str(log.site_id),
+            'site_name': log.site.name,
+            'description': f'Submitted daily log — {summary}',
+            'timestamp': log.created_at.isoformat(),
+        })
+
+    for bill in Bill.objects.filter(
+        site_id__in=assigned_site_ids, logged_by=manager,
+    ).select_related('site').order_by('-created_at')[:20]:
+        activities.append({
+            'id': f'bill-{bill.id}',
+            'type': 'bill',
+            'site_id': str(bill.site_id),
+            'site_name': bill.site.name,
+            'description': f'Logged {bill.material_type} bill from {bill.supplier_name}',
+            'timestamp': bill.created_at.isoformat(),
+        })
+
+    for att in AttendanceSummary.objects.filter(
+        site_id__in=assigned_site_ids, submitted_by=manager,
+    ).select_related('site').order_by('-submitted_at')[:20]:
+        activities.append({
+            'id': f'att-{att.id}',
+            'type': 'attendance',
+            'site_id': str(att.site_id),
+            'site_name': att.site.name,
+            'description': f'Submitted attendance — {att.total_present} workers present',
+            'timestamp': att.submitted_at.isoformat(),
+        })
+
+    activities.sort(key=lambda x: x['timestamp'], reverse=True)
+    limit = int(request.query_params.get('limit', 30))
+    return success_response('Activity retrieved.', activities[:limit])
 
 
 @api_view(['PATCH'])
