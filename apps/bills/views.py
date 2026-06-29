@@ -21,6 +21,24 @@ def _get_tenant_or_error(user):
     return tenant, None
 
 
+def _parse_month(month_str):
+    """Return (year, month) ints from YYYY-MM or None if invalid/empty."""
+    if not month_str:
+        return None
+    try:
+        year, month = month_str.split('-')
+        return int(year), int(month)
+    except (ValueError, AttributeError):
+        return None
+
+
+def _tenant_site_ids(tenant, site_id=None):
+    qs = Site.objects.filter(tenant=tenant)
+    if site_id:
+        qs = qs.filter(id=site_id)
+    return qs.values_list('id', flat=True)
+
+
 @api_view(['GET'])
 @permission_classes([IsOwner])
 def finance_summary(request):
@@ -33,41 +51,38 @@ def finance_summary(request):
         return err
 
     month_str = request.query_params.get('month', '')
-    site_ids = Site.objects.filter(tenant=tenant, is_active=True).values_list('id', flat=True)
+    site_id = request.query_params.get('site_id')
+    site_ids = _tenant_site_ids(tenant, site_id)
+    if site_id and not site_ids:
+        return error_response('Site not found.', {}, 404)
 
     bills_qs = Bill.objects.filter(site_id__in=site_ids)
-    if month_str:
-        try:
-            year, month = month_str.split('-')
-            bills_qs = bills_qs.filter(log_date__year=int(year), log_date__month=int(month))
-        except (ValueError, AttributeError):
-            return error_response('month must be in YYYY-MM format.', {}, 400)
+    parsed = _parse_month(month_str)
+    if month_str and not parsed:
+        return error_response('month must be in YYYY-MM format.', {}, 400)
+    if parsed:
+        year, month = parsed
+        bills_qs = bills_qs.filter(log_date__year=year, log_date__month=month)
 
     total_materials = bills_qs.aggregate(total=Sum('total_amount_lkr'))['total'] or 0
 
     from apps.attendance.models import DailyAttendance
     wages_qs = DailyAttendance.objects.filter(site_id__in=site_ids)
-    if month_str:
-        try:
-            wages_qs = wages_qs.filter(log_date__year=int(year), log_date__month=int(month))
-        except Exception:
-            pass
+    if parsed:
+        wages_qs = wages_qs.filter(log_date__year=year, log_date__month=month)
     total_wages = wages_qs.aggregate(total=Sum('total_earned_lkr'))['total'] or 0
 
     # Prev-month comparison for change indicators
-    if month_str:
-        try:
-            y, m = int(year), int(month)
-            prev_y, prev_m = (y - 1, 12) if m == 1 else (y, m - 1)
-            prev_mat = Bill.objects.filter(
-                site_id__in=site_ids, log_date__year=prev_y, log_date__month=prev_m
-            ).aggregate(t=Sum('total_amount_lkr'))['t'] or 0
-            from apps.attendance.models import DailyAttendance as _DA
-            prev_wag = _DA.objects.filter(
-                site_id__in=site_ids, log_date__year=prev_y, log_date__month=prev_m
-            ).aggregate(t=Sum('total_earned_lkr'))['t'] or 0
-        except Exception:
-            prev_mat, prev_wag = 0, 0
+    if parsed:
+        y, m = parsed
+        prev_y, prev_m = (y - 1, 12) if m == 1 else (y, m - 1)
+        prev_mat = Bill.objects.filter(
+            site_id__in=site_ids, log_date__year=prev_y, log_date__month=prev_m
+        ).aggregate(t=Sum('total_amount_lkr'))['t'] or 0
+        from apps.attendance.models import DailyAttendance as _DA
+        prev_wag = _DA.objects.filter(
+            site_id__in=site_ids, log_date__year=prev_y, log_date__month=prev_m
+        ).aggregate(t=Sum('total_earned_lkr'))['t'] or 0
     else:
         prev_mat, prev_wag = 0, 0
 
@@ -81,7 +96,9 @@ def finance_summary(request):
     total_mat  = float(total_materials)
     total_wag  = float(total_wages)
 
-    active_sites = Site.objects.filter(tenant=tenant, is_active=True).count()
+    active_sites = Site.objects.filter(
+        tenant=tenant, is_active=True, id__in=site_ids
+    ).count() if site_id else Site.objects.filter(tenant=tenant, is_active=True).count()
 
     return success_response('Finance summary.', {
         'month':                 month_str,
@@ -108,16 +125,23 @@ def finance_bills(request):
     if err:
         return err
 
-    site_ids = Site.objects.filter(tenant=tenant).values_list('id', flat=True)
+    site_ids = _tenant_site_ids(tenant, request.query_params.get('site_id'))
+    if request.query_params.get('site_id') and not site_ids:
+        return error_response('Site not found.', {}, 404)
+
     bills = Bill.objects.filter(site_id__in=site_ids).select_related('site', 'logged_by')
 
     material = request.query_params.get('material')
     if material:
         bills = bills.filter(material_type=material)
 
-    site_id = request.query_params.get('site_id')
-    if site_id:
-        bills = bills.filter(site_id=site_id)
+    month_str = request.query_params.get('month', '')
+    parsed = _parse_month(month_str)
+    if month_str and not parsed:
+        return error_response('month must be in YYYY-MM format.', {}, 400)
+    if parsed:
+        year, month = parsed
+        bills = bills.filter(log_date__year=year, log_date__month=month)
 
     from apps.core.utils import paginate_queryset
     page = int(request.query_params.get('page', 1))
@@ -131,6 +155,25 @@ def finance_bills(request):
 
 @api_view(['GET'])
 @permission_classes([IsOwner])
+def finance_bill_detail(request, bill_id):
+    """GET /api/finances/bills/:id/ — single bill record for detail view."""
+    tenant, err = _get_tenant_or_error(request.user)
+    if err:
+        return err
+
+    site_ids = _tenant_site_ids(tenant)
+    try:
+        bill = Bill.objects.select_related('site', 'logged_by').get(
+            id=bill_id, site_id__in=site_ids
+        )
+    except Bill.DoesNotExist:
+        return error_response('Bill not found.', {}, 404)
+
+    return success_response('Bill retrieved.', BillSerializer(bill).data)
+
+
+@api_view(['GET'])
+@permission_classes([IsOwner])
 def finance_wages(request):
     """GET /api/finances/wages/ — daily wage summary."""
     tenant, err = _get_tenant_or_error(request.user)
@@ -140,8 +183,19 @@ def finance_wages(request):
     from apps.attendance.models import AttendanceSummary
     from apps.attendance.serializers import AttendanceSummarySerializer
 
-    site_ids = Site.objects.filter(tenant=tenant).values_list('id', flat=True)
+    site_ids = _tenant_site_ids(tenant, request.query_params.get('site_id'))
+    if request.query_params.get('site_id') and not site_ids:
+        return error_response('Site not found.', {}, 404)
+
     summaries = AttendanceSummary.objects.filter(site_id__in=site_ids).order_by('-log_date')
+
+    month_str = request.query_params.get('month', '')
+    parsed = _parse_month(month_str)
+    if month_str and not parsed:
+        return error_response('month must be in YYYY-MM format.', {}, 400)
+    if parsed:
+        year, month = parsed
+        summaries = summaries.filter(log_date__year=year, log_date__month=month)
 
     from apps.core.utils import paginate_queryset
     page = int(request.query_params.get('page', 1))
@@ -155,18 +209,65 @@ def finance_wages(request):
 
 @api_view(['GET'])
 @permission_classes([IsOwner])
+def finance_wage_detail(request, summary_id):
+    """GET /api/finances/wages/:id/ — single wage summary for detail view."""
+    tenant, err = _get_tenant_or_error(request.user)
+    if err:
+        return err
+
+    from apps.attendance.models import AttendanceSummary, DailyAttendance
+    from apps.attendance.serializers import AttendanceSummarySerializer, DailyAttendanceSerializer
+
+    site_ids = _tenant_site_ids(tenant)
+    try:
+        summary = AttendanceSummary.objects.select_related('site').get(
+            id=summary_id, site_id__in=site_ids
+        )
+    except AttendanceSummary.DoesNotExist:
+        return error_response('Wage summary not found.', {}, 404)
+
+    workers = DailyAttendance.objects.filter(
+        site=summary.site, log_date=summary.log_date
+    ).select_related('worker')
+
+    return success_response('Wage summary retrieved.', {
+        'summary': AttendanceSummarySerializer(summary).data,
+        'workers': DailyAttendanceSerializer(workers, many=True).data,
+    })
+
+
+@api_view(['GET'])
+@permission_classes([IsOwner])
 def finance_by_site(request):
     """GET /api/finances/by-site/ — per-site spend breakdown."""
     tenant, err = _get_tenant_or_error(request.user)
     if err:
         return err
 
+    site_id = request.query_params.get('site_id')
     sites = Site.objects.filter(tenant=tenant, is_active=True)
+    if site_id:
+        sites = sites.filter(id=site_id)
+        if not sites.exists():
+            return error_response('Site not found.', {}, 404)
+
+    month_str = request.query_params.get('month', '')
+    parsed = _parse_month(month_str)
+    if month_str and not parsed:
+        return error_response('month must be in YYYY-MM format.', {}, 400)
+
+    from apps.attendance.models import DailyAttendance
+
     result = []
     for site in sites:
-        mat = Bill.objects.filter(site=site).aggregate(t=Sum('total_amount_lkr'))['t'] or 0
-        from apps.attendance.models import DailyAttendance
-        wag = DailyAttendance.objects.filter(site=site).aggregate(t=Sum('total_earned_lkr'))['t'] or 0
+        bills_qs = Bill.objects.filter(site=site)
+        wages_qs = DailyAttendance.objects.filter(site=site)
+        if parsed:
+            year, month = parsed
+            bills_qs = bills_qs.filter(log_date__year=year, log_date__month=month)
+            wages_qs = wages_qs.filter(log_date__year=year, log_date__month=month)
+        mat = bills_qs.aggregate(t=Sum('total_amount_lkr'))['t'] or 0
+        wag = wages_qs.aggregate(t=Sum('total_earned_lkr'))['t'] or 0
         result.append({
             'site_id': str(site.id),
             'site_name': site.name,

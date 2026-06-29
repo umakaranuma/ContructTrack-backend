@@ -26,7 +26,11 @@ def list_reports(request):
         return error_response('Tenant not found.', {}, 404)
 
     from apps.core.utils import paginate_queryset
-    reports = Report.objects.filter(tenant=tenant).order_by('-created_at')
+    reports = Report.objects.filter(tenant=tenant).select_related('site').order_by('-created_at')
+
+    site_id = request.query_params.get('site_id')
+    if site_id:
+        reports = reports.filter(site_id=site_id)
     page  = int(request.query_params.get('page', 1))
     limit = int(request.query_params.get('limit', 20))
     paged, total, pages = paginate_queryset(reports, page, limit)
