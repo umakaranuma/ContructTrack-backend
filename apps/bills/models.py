@@ -14,6 +14,14 @@ MATERIAL_TYPES = [
     ('steel', 'Steel'),
     ('blocks', 'Blocks'),
     ('aggregate', 'Aggregate'),
+    ('pipes', 'Pipes & Fittings'),
+    ('timber', 'Timber'),
+    ('bricks', 'Bricks'),
+    ('roofing', 'Roofing Materials'),
+    ('electrical', 'Electrical Materials'),
+    ('plumbing', 'Plumbing Materials'),
+    ('tiles', 'Tiles & Flooring'),
+    ('paint', 'Paint & Finishing'),
     ('other', 'Other'),
 ]
 

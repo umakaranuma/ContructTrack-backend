@@ -9,7 +9,6 @@ from rest_framework.decorators import api_view, permission_classes, throttle_cla
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.throttling import AnonRateThrottle
 from rest_framework_simplejwt.tokens import RefreshToken
-from rest_framework_simplejwt.exceptions import TokenError
 
 from apps.core.utils import success_response, error_response
 from apps.core.permissions import IsOwner, IsAdminUser
@@ -173,18 +172,13 @@ def login_view(request):
 @permission_classes([IsAuthenticated])
 def logout_view(request):
     """
-    Blacklists the refresh token so it can no longer be used.
-    The access token expires naturally (8h) — we don't store it server-side.
+    Client signals logout. Since token_blacklist app is not installed,
+    the refresh token is simply discarded by the client. The access token
+    expires naturally after 8 hours.
     """
-    try:
-        refresh_token = request.data.get('refresh_token')
-        if not refresh_token:
-            return error_response('refresh_token is required.', {}, 400)
-        token = RefreshToken(refresh_token)
-        token.blacklist()
-        return success_response('Logged out successfully.')
-    except TokenError:
-        return error_response('Invalid or already-expired token.', {}, 400)
+    # Server-side blacklisting requires token_blacklist app which we excluded
+    # to avoid extra tables. Logout is enforced client-side (delete tokens from storage).
+    return success_response('Logged out successfully. Please delete your tokens.')
 
 
 @api_view(['GET', 'PATCH'])
@@ -262,18 +256,71 @@ def search_manager_by_email(request):
 def invite_manager(request):
     """
     POST /api/managers/invite/
-    Placeholder — in production this sends an SMS/email with a sign-up link.
-    For now it records intent and returns instructions.
+    Sends an email invitation so a new person can register on the mobile app
+    and join this owner's team. Email is sent via the configured SMTP backend.
     """
-    phone = request.data.get('phone', '')
-    email = request.data.get('email', '')
-    if not phone and not email:
-        return error_response('Provide at least phone or email to send invite.', {}, 400)
-    # TODO: trigger Celery task to send WhatsApp/SMS invite via Dialog LK
-    return success_response('Invitation queued. Manager will receive instructions shortly.', {
-        'phone': phone,
-        'email': email,
-    })
+    from django.core.mail import send_mail
+    from django.conf import settings as django_settings
+    from apps.tenants.models import Tenant
+
+    email = request.data.get('email', '').strip().lower()
+    site_id = request.data.get('site_id', '').strip()
+    personal_message = request.data.get('message', '').strip()
+
+    if not email:
+        return error_response('Email address is required.', {}, 400)
+
+    # Resolve owner's company name for a personalised email
+    tenant = Tenant.objects.filter(owner=request.user).first()
+    company_name = tenant.company_name if tenant else request.user.full_name
+
+    site_name = ''
+    if site_id:
+        from apps.sites.models import Site
+        site = Site.objects.filter(id=site_id, tenant=tenant).first()
+        if site:
+            site_name = site.name
+
+    # Build plain-text invitation email
+    register_url = 'https://constructtrack.lk/register-manager'
+    site_line = f'\nYou will be pre-assigned to site: {site_name}' if site_name else ''
+    personal_line = (
+        f'\nPersonal message from {request.user.full_name}:\n"{personal_message}"\n'
+        if personal_message else ''
+    )
+
+    subject = f"You're invited to join {company_name} on ConstructTrack"
+    body = (
+        f"Hello,\n\n"
+        f"{request.user.full_name} from {company_name} has invited you to join their "
+        f"ConstructTrack account as a Site Manager.{site_line}\n"
+        f"{personal_line}\n"
+        f"To get started:\n"
+        f"1. Download the ConstructTrack mobile app\n"
+        f"2. Register using this exact email address: {email}\n"
+        f"   (Registration link: {register_url})\n"
+        f"3. Share your Manager Reference Code (MGR-XXXX) with {request.user.full_name}\n"
+        f"   so they can confirm your access.\n\n"
+        f"If you did not expect this invitation, you can safely ignore this email.\n\n"
+        f"---\nConstructTrack — Construction Site Management for Sri Lanka\n"
+    )
+
+    try:
+        send_mail(
+            subject=subject,
+            message=body,
+            from_email=django_settings.DEFAULT_FROM_EMAIL,
+            recipient_list=[email],
+            fail_silently=False,
+        )
+        logger.info('Manager invite sent to %s by owner %s', email, request.user.email)
+        return success_response('Invitation email sent successfully.', {
+            'email': email,
+            'site': site_name or None,
+        })
+    except Exception as exc:
+        logger.exception('Failed to send manager invite email to %s: %s', email, exc)
+        return error_response('Could not send invitation email. Please check SMTP settings.', {}, 500)
 
 
 @api_view(['POST'])
