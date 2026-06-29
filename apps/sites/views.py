@@ -117,18 +117,17 @@ def _get_site_for_user_or_none(user, site_id):
         return None
 
 
-def _fetch_site_progress_logs(site, limit=50):
+def _fetch_site_progress_logs(site, limit=50, log_date=None):
     from collections import Counter
     from apps.progress.models import ProgressLog
     from apps.progress.serializers import SiteDailyLogSerializer
     from apps.bills.models import Bill
     from apps.attendance.models import AttendanceSummary
 
-    logs = list(
-        ProgressLog.objects.filter(site=site)
-        .select_related('logged_by')
-        .order_by('-log_date')[:limit]
-    )
+    qs = ProgressLog.objects.filter(site=site).select_related('logged_by').order_by('-log_date')
+    if log_date:
+        qs = qs.filter(log_date=log_date)
+    logs = list(qs[:limit])
 
     if not logs:
         return []
@@ -267,21 +266,23 @@ def site_daily_logs(request, site_id):
         return error_response('Site not found.', {}, 404)
 
     if request.method == 'GET':
-        data = _fetch_site_progress_logs(site)
+        log_date = request.query_params.get('date', '').strip() or None
+        data = _fetch_site_progress_logs(site, log_date=log_date)
         return success_response('Logs retrieved.', {
             'results': data,
             'total': len(data),
         })
 
-    from apps.progress.serializers import ProgressLogCreateSerializer, SiteDailyLogSerializer
+    from apps.progress.serializers import ProgressLogCreateSerializer
+    from apps.progress.services import upsert_progress_log, serialize_site_daily_log
 
     serializer = ProgressLogCreateSerializer(data=request.data)
     if not serializer.is_valid():
         return error_response('Validation failed.', serializer.errors, 422)
 
-    stage = serializer.validated_data.get('stage') or site.current_stage
-    log = serializer.save(site=site, logged_by=request.user, stage=stage)
-    return success_response('Daily log created.', SiteDailyLogSerializer(log).data, 201)
+    log, created = upsert_progress_log(site, request.user, serializer.validated_data)
+    message = 'Daily log created.' if created else 'Daily log updated for this date.'
+    return success_response(message, serialize_site_daily_log(site, log), 201 if created else 200)
 
 
 @api_view(['GET', 'POST'])

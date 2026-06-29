@@ -280,16 +280,16 @@ def mobile_progress(request, site_id):
             logs = logs.filter(log_date=date_filter)
         return success_response('Progress logs.', ProgressLogSerializer(logs[:30], many=True).data)
 
-    # POST
+    # POST — create or update (one log per site per day)
+    from apps.progress.services import upsert_progress_log
+
     serializer = ProgressLogCreateSerializer(data=request.data)
     if not serializer.is_valid():
         return error_response('Validation failed.', serializer.errors, 422)
 
-    # If stage not provided, use site's current stage
-    stage = serializer.validated_data.get('stage') or site.current_stage
-    log = serializer.save(site=site, logged_by=request.user, stage=stage)
-
-    return success_response('Progress logged.', ProgressLogSerializer(log).data, 201)
+    log, created = upsert_progress_log(site, request.user, serializer.validated_data)
+    message = 'Progress logged.' if created else 'Progress log updated for this date.'
+    return success_response(message, ProgressLogSerializer(log).data, 201 if created else 200)
 
 
 @api_view(['POST'])

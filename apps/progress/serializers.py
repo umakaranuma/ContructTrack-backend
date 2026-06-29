@@ -39,7 +39,7 @@ class SiteDailyLogSerializer(serializers.ModelSerializer):
     class Meta:
         model = ProgressLog
         fields = [
-            'id', 'log_date', 'date', 'stage', 'work_done_today',
+            'id', 'log_date', 'date', 'stage', 'work_done_today', 'tomorrow_status',
             'manager', 'materials_in', 'materials_out', 'workers', 'total_wage',
             'created_at',
         ]
@@ -63,6 +63,10 @@ class SiteDailyLogSerializer(serializers.ModelSerializer):
 
 
 class ProgressLogCreateSerializer(serializers.ModelSerializer):
+    stage = serializers.CharField(max_length=30, required=False, allow_blank=True)
+    tomorrow_status = serializers.CharField(max_length=100, required=False, default='working')
+    blockers = serializers.CharField(max_length=30, required=False, allow_blank=True, allow_null=True)
+
     class Meta:
         model = ProgressLog
         fields = [

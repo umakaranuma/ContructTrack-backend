@@ -54,9 +54,9 @@ class ProgressLog(models.Model):
     )
     blocker_note = models.TextField(blank=True, null=True)
     tomorrow_status = models.CharField(
-        max_length=20,
-        choices=TOMORROW_STATUS_CHOICES,
+        max_length=100,
         default='working',
+        help_text='Preset or custom status for the next working day.',
     )
 
     is_synced = models.BooleanField(default=True)
