@@ -3,6 +3,7 @@ Site management views.
 All queries are filtered by tenant — a manager can only see sites they are assigned to;
 an owner sees all sites belonging to their tenant.
 """
+from django.db.models import Q
 from django.utils import timezone
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
@@ -40,6 +41,13 @@ def _get_sites_for_user(user):
 def site_list_create(request):
     if request.method == 'GET':
         sites = _get_sites_for_user(request.user)
+
+        search = request.query_params.get('search', '').strip()
+        if search:
+            sites = sites.filter(
+                Q(name__icontains=search) | Q(address__icontains=search)
+            )
+
         page = int(request.query_params.get('page', 1))
         limit = int(request.query_params.get('limit', 20))
         paged, total, pages = paginate_queryset(sites, page, limit)
