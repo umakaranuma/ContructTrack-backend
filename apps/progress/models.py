@@ -58,6 +58,10 @@ class ProgressLog(models.Model):
         default='working',
         help_text='Preset or custom status for the next working day.',
     )
+    tomorrow_plan = models.TextField(
+        blank=True, null=True,
+        help_text='Free-text plan of what the team intends to do tomorrow.',
+    )
 
     is_synced = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)

@@ -117,6 +117,97 @@ def _get_site_for_user_or_none(user, site_id):
         return None
 
 
+@api_view(['GET'])
+@permission_classes([IsOwnerOrManager])
+def site_financials(request, site_id):
+    """
+    GET /api/sites/:id/financials/
+    Real chart data for the SiteDetail overview:
+      - budget_vs_actual: last 6 months of (monthly budget share, actual spend)
+      - material_breakdown: total spend per material type (all-time for this site)
+    """
+    site = _get_site_for_user_or_none(request.user, site_id)
+    if not site:
+        return error_response('Site not found.', {}, 404)
+
+    from datetime import date
+    from django.db.models import Sum
+    from apps.bills.models import Bill
+    from apps.attendance.models import DailyAttendance
+
+    today = timezone.now().date()
+
+    # Monthly budget share: total budget spread across the planned project months.
+    monthly_budget = 0.0
+    if site.budget_lkr:
+        if site.start_date and site.end_date and site.end_date > site.start_date:
+            months_span = max(
+                (site.end_date.year - site.start_date.year) * 12
+                + (site.end_date.month - site.start_date.month) + 1,
+                1,
+            )
+        else:
+            months_span = 12
+        monthly_budget = float(site.budget_lkr) / months_span
+
+    budget_vs_actual = []
+    for i in range(5, -1, -1):
+        # walk back i months from the current month
+        y, m = today.year, today.month - i
+        while m <= 0:
+            m += 12
+            y -= 1
+        mat = Bill.objects.filter(
+            site=site, log_date__year=y, log_date__month=m,
+        ).aggregate(t=Sum('total_amount_lkr'))['t'] or 0
+        wag = DailyAttendance.objects.filter(
+            site=site, log_date__year=y, log_date__month=m,
+        ).aggregate(t=Sum('total_earned_lkr'))['t'] or 0
+        budget_vs_actual.append({
+            'month':  date(y, m, 1).strftime('%b'),
+            'budget': round(monthly_budget, 2),
+            'actual': float(mat) + float(wag),
+        })
+
+    material_rows = (
+        Bill.objects.filter(site=site)
+        .values('material_type')
+        .annotate(total=Sum('total_amount_lkr'))
+        .order_by('-total')
+    )
+    material_breakdown = [
+        {
+            'name':  dict(Bill._meta.get_field('material_type').choices).get(
+                r['material_type'], r['material_type'],
+            ),
+            'value': float(r['total'] or 0),
+        }
+        for r in material_rows
+    ]
+
+    total_material = float(
+        Bill.objects.filter(site=site).aggregate(t=Sum('total_amount_lkr'))['t'] or 0
+    )
+    total_labour = float(
+        DailyAttendance.objects.filter(site=site).aggregate(t=Sum('total_earned_lkr'))['t'] or 0
+    )
+    total_spend = total_material + total_labour
+
+    return success_response('Site financials.', {
+        'budget_vs_actual':   budget_vs_actual,
+        'material_breakdown': material_breakdown,
+        'monthly_budget_lkr': round(monthly_budget, 2),
+        'totals': {
+            'material_lkr':  total_material,
+            'labour_lkr':    total_labour,
+            'total_spend_lkr': total_spend,
+            'budget_lkr':    float(site.budget_lkr) if site.budget_lkr else 0,
+            'material_pct':  round(total_material / total_spend * 100) if total_spend > 0 else 0,
+            'labour_pct':    round(total_labour / total_spend * 100) if total_spend > 0 else 0,
+        },
+    })
+
+
 def _fetch_site_progress_logs(site, limit=50, log_date=None):
     from apps.progress.models import ProgressLog
     from apps.progress.serializers import SiteDailyLogSerializer

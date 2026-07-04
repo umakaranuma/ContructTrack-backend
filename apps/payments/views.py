@@ -20,6 +20,17 @@ from .serializers import PaymentSerializer
 logger = logging.getLogger(__name__)
 
 
+@api_view(['GET'])
+@permission_classes([IsOwner])
+def payment_history(request):
+    """GET /api/payments/history/ — the tenant's own payment records."""
+    tenant = Tenant.objects.filter(owner=request.user).first()
+    if not tenant:
+        return error_response('Tenant not found.', {}, 404)
+    payments = Payment.objects.filter(tenant=tenant).order_by('-created_at')[:50]
+    return success_response('Payment history.', PaymentSerializer(payments, many=True).data)
+
+
 @api_view(['POST'])
 @permission_classes([IsOwner])
 def initiate_payment(request):

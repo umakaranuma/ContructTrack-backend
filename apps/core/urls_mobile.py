@@ -13,10 +13,12 @@ urlpatterns = [
 
     # Bills
     path('sites/<uuid:site_id>/bills/', v.mobile_bills, name='mobile-bills'),
+    path('sites/<uuid:site_id>/bills/<uuid:bill_id>/', v.mobile_bill_detail, name='mobile-bill-detail'),
     path('sites/<uuid:site_id>/bills/<uuid:bill_id>/photo/', v.mobile_bill_photo, name='mobile-bill-photo'),
 
     # Workers
     path('sites/<uuid:site_id>/workers/', v.mobile_workers, name='mobile-workers'),
+    path('sites/<uuid:site_id>/workers/<uuid:worker_id>/', v.mobile_worker_detail, name='mobile-worker-detail'),
 
     # Attendance
     path('sites/<uuid:site_id>/attendance/', v.mobile_attendance, name='mobile-attendance'),
@@ -24,7 +26,11 @@ urlpatterns = [
 
     # Progress
     path('sites/<uuid:site_id>/progress/', v.mobile_progress, name='mobile-progress'),
+    path('sites/<uuid:site_id>/progress/<uuid:log_id>/', v.mobile_progress_detail, name='mobile-progress-detail'),
     path('sites/<uuid:site_id>/progress/<uuid:log_id>/photos/', v.mobile_progress_photos, name='mobile-progress-photos'),
+
+    # Photo upload
+    path('upload/', v.mobile_upload, name='mobile-upload'),
 
     # Bulk offline sync
     path('sync/', v.mobile_sync, name='mobile-sync'),

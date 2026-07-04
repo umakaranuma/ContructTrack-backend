@@ -39,6 +39,31 @@ def _tenant_site_ids(tenant, site_id=None):
     return qs.values_list('id', flat=True)
 
 
+def _apply_period(qs, request, date_field='log_date'):
+    """
+    Applies the period filter to a queryset.
+    Priority: explicit date_from/date_to range > month=YYYY-MM.
+    Returns (filtered_qs, error_response_or_None).
+    """
+    date_from = request.query_params.get('date_from')
+    date_to = request.query_params.get('date_to')
+    if date_from or date_to:
+        if date_from:
+            qs = qs.filter(**{f'{date_field}__gte': date_from})
+        if date_to:
+            qs = qs.filter(**{f'{date_field}__lte': date_to})
+        return qs, None
+
+    month_str = request.query_params.get('month', '')
+    parsed = _parse_month(month_str)
+    if month_str and not parsed:
+        return qs, error_response('month must be in YYYY-MM format.', {}, 400)
+    if parsed:
+        year, month = parsed
+        qs = qs.filter(**{f'{date_field}__year': year, f'{date_field}__month': month})
+    return qs, None
+
+
 @api_view(['GET'])
 @permission_classes([IsOwner])
 def finance_summary(request):
@@ -56,35 +81,63 @@ def finance_summary(request):
     if site_id and not site_ids:
         return error_response('Site not found.', {}, 404)
 
-    bills_qs = Bill.objects.filter(site_id__in=site_ids)
-    parsed = _parse_month(month_str)
-    if month_str and not parsed:
-        return error_response('month must be in YYYY-MM format.', {}, 400)
-    if parsed:
-        year, month = parsed
-        bills_qs = bills_qs.filter(log_date__year=year, log_date__month=month)
+    from datetime import date, timedelta
+    from apps.attendance.models import DailyAttendance
 
+    # Resolve the requested period into an explicit [start, end] date range so
+    # totals and previous-period comparisons use identical logic for
+    # day / week / month / year / custom filters.
+    date_from = request.query_params.get('date_from')
+    date_to = request.query_params.get('date_to')
+    parsed = _parse_month(month_str)
+    if month_str and not parsed and not (date_from or date_to):
+        return error_response('month must be in YYYY-MM format.', {}, 400)
+
+    range_start = range_end = None
+    if date_from or date_to:
+        try:
+            range_start = date.fromisoformat(date_from) if date_from else None
+            range_end = date.fromisoformat(date_to) if date_to else None
+        except ValueError:
+            return error_response('dates must be in YYYY-MM-DD format.', {}, 400)
+    elif parsed:
+        year, month = parsed
+        range_start = date(year, month, 1)
+        range_end = (date(year + 1, 1, 1) if month == 12 else date(year, month + 1, 1)) - timedelta(days=1)
+
+    def _range_filter(qs):
+        if range_start:
+            qs = qs.filter(log_date__gte=range_start)
+        if range_end:
+            qs = qs.filter(log_date__lte=range_end)
+        return qs
+
+    bills_qs = _range_filter(Bill.objects.filter(site_id__in=site_ids))
     total_materials = bills_qs.aggregate(total=Sum('total_amount_lkr'))['total'] or 0
 
-    from apps.attendance.models import DailyAttendance
-    wages_qs = DailyAttendance.objects.filter(site_id__in=site_ids)
-    if parsed:
-        wages_qs = wages_qs.filter(log_date__year=year, log_date__month=month)
+    wages_qs = _range_filter(DailyAttendance.objects.filter(site_id__in=site_ids))
     total_wages = wages_qs.aggregate(total=Sum('total_earned_lkr'))['total'] or 0
 
-    # Prev-month comparison for change indicators
-    if parsed:
-        y, m = parsed
-        prev_y, prev_m = (y - 1, 12) if m == 1 else (y, m - 1)
+    # Previous-period comparison. For a whole calendar month use the true
+    # previous calendar month (exact), otherwise use the equal-length window
+    # immediately before the selected range (exact for day/week/year/custom).
+    prev_mat = prev_wag = 0
+    if range_start and range_end:
+        if parsed and not (date_from or date_to):
+            y, m = parsed
+            prev_y, prev_m = (y - 1, 12) if m == 1 else (y, m - 1)
+            prev_start = date(prev_y, prev_m, 1)
+            prev_end = (date(prev_y + 1, 1, 1) if prev_m == 12
+                        else date(prev_y, prev_m + 1, 1)) - timedelta(days=1)
+        else:
+            span = (range_end - range_start) + timedelta(days=1)
+            prev_start, prev_end = range_start - span, range_start - timedelta(days=1)
         prev_mat = Bill.objects.filter(
-            site_id__in=site_ids, log_date__year=prev_y, log_date__month=prev_m
+            site_id__in=site_ids, log_date__gte=prev_start, log_date__lte=prev_end,
         ).aggregate(t=Sum('total_amount_lkr'))['t'] or 0
-        from apps.attendance.models import DailyAttendance as _DA
-        prev_wag = _DA.objects.filter(
-            site_id__in=site_ids, log_date__year=prev_y, log_date__month=prev_m
+        prev_wag = DailyAttendance.objects.filter(
+            site_id__in=site_ids, log_date__gte=prev_start, log_date__lte=prev_end,
         ).aggregate(t=Sum('total_earned_lkr'))['t'] or 0
-    else:
-        prev_mat, prev_wag = 0, 0
 
     def _pct_change(current, prev):
         if not prev:
@@ -135,13 +188,9 @@ def finance_bills(request):
     if material:
         bills = bills.filter(material_type=material)
 
-    month_str = request.query_params.get('month', '')
-    parsed = _parse_month(month_str)
-    if month_str and not parsed:
-        return error_response('month must be in YYYY-MM format.', {}, 400)
-    if parsed:
-        year, month = parsed
-        bills = bills.filter(log_date__year=year, log_date__month=month)
+    bills, err = _apply_period(bills, request)
+    if err:
+        return err
 
     from apps.core.utils import paginate_queryset
     page = int(request.query_params.get('page', 1))
@@ -189,13 +238,9 @@ def finance_wages(request):
 
     summaries = AttendanceSummary.objects.filter(site_id__in=site_ids).order_by('-log_date')
 
-    month_str = request.query_params.get('month', '')
-    parsed = _parse_month(month_str)
-    if month_str and not parsed:
-        return error_response('month must be in YYYY-MM format.', {}, 400)
-    if parsed:
-        year, month = parsed
-        summaries = summaries.filter(log_date__year=year, log_date__month=month)
+    summaries, err = _apply_period(summaries, request)
+    if err:
+        return err
 
     from apps.core.utils import paginate_queryset
     page = int(request.query_params.get('page', 1))
@@ -251,21 +296,16 @@ def finance_by_site(request):
         if not sites.exists():
             return error_response('Site not found.', {}, 404)
 
-    month_str = request.query_params.get('month', '')
-    parsed = _parse_month(month_str)
-    if month_str and not parsed:
-        return error_response('month must be in YYYY-MM format.', {}, 400)
-
     from apps.attendance.models import DailyAttendance
 
     result = []
     for site in sites:
-        bills_qs = Bill.objects.filter(site=site)
-        wages_qs = DailyAttendance.objects.filter(site=site)
-        if parsed:
-            year, month = parsed
-            bills_qs = bills_qs.filter(log_date__year=year, log_date__month=month)
-            wages_qs = wages_qs.filter(log_date__year=year, log_date__month=month)
+        bills_qs, err = _apply_period(Bill.objects.filter(site=site), request)
+        if err:
+            return err
+        wages_qs, err = _apply_period(DailyAttendance.objects.filter(site=site), request)
+        if err:
+            return err
         mat = bills_qs.aggregate(t=Sum('total_amount_lkr'))['t'] or 0
         wag = wages_qs.aggregate(t=Sum('total_earned_lkr'))['t'] or 0
         result.append({

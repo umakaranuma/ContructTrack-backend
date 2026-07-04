@@ -45,18 +45,85 @@ def _get_site_or_error(user, site_id):
         return None, error_response('Site not found or not accessible.', {}, 404)
 
 
+EDIT_WINDOW_HOURS = 24
+
+
+def _check_edit_window(user, record, logged_by_field='logged_by'):
+    """
+    Managers may edit/delete only their own records and only within
+    EDIT_WINDOW_HOURS of creation. Owners are unrestricted.
+    Returns an error response or None if allowed.
+    """
+    if user.user_type == 'owner':
+        return None
+    if getattr(record, logged_by_field + '_id', None) != user.id:
+        return error_response('You can only modify records you created.', {}, 403)
+    age = timezone.now() - record.created_at
+    if age.total_seconds() > EDIT_WINDOW_HOURS * 3600:
+        return error_response(
+            f'Records can only be edited or deleted within {EDIT_WINDOW_HOURS} hours of entry. '
+            'Contact your site owner to make changes.',
+            {}, 403,
+        )
+    return None
+
+
+def _parse_date_range(request):
+    """
+    Reads optional ?date_from=YYYY-MM-DD&date_to=YYYY-MM-DD query params.
+    Returns (date_from, date_to) as strings or (None, None).
+    """
+    return (
+        request.query_params.get('date_from') or None,
+        request.query_params.get('date_to') or None,
+    )
+
+
 @api_view(['GET'])
 @permission_classes([IsOwnerOrManager])
 def mobile_sites(request):
     """GET /api/mobile/sites/ — compact site list for the mobile home screen."""
+    from apps.sites.models import CONSTRUCTION_STAGES
+    from apps.progress.models import ProgressLog
+
+    stage_slugs = [s[0] for s in CONSTRUCTION_STAGES]
+    today = timezone.now().date()
+
     sites = _get_manager_sites(request.user)
-    data = [{
-        'id': str(s.id),
-        'name': s.name,
-        'current_stage': s.current_stage,
-        'project_type': s.project_type,
-        'is_active': s.is_active,
-    } for s in sites]
+    data = []
+    for s in sites:
+        # Progress percentage from stage position in the ordered stage list.
+        try:
+            idx = stage_slugs.index(s.current_stage)
+            progress_pct = round((idx + 1) / len(stage_slugs) * 100)
+        except ValueError:
+            progress_pct = 0
+
+        # Derive a human status for the card.
+        if not s.is_active:
+            status = 'inactive'
+        elif s.current_stage == 'completed':
+            status = 'completed'
+        elif s.start_date and s.start_date > today:
+            status = 'upcoming'
+        else:
+            status = 'in_progress'
+
+        today_log_done = ProgressLog.objects.filter(site=s, log_date=today).exists()
+
+        data.append({
+            'id': str(s.id),
+            'name': s.name,
+            'address': s.address or '',
+            'current_stage': s.current_stage,
+            'project_type': s.project_type,
+            'is_active': s.is_active,
+            'status': status,
+            'progress_pct': progress_pct,
+            'start_date': s.start_date.isoformat() if s.start_date else None,
+            'end_date': s.end_date.isoformat() if s.end_date else None,
+            'today_log_submitted': today_log_done,
+        })
     return success_response('Sites retrieved.', data)
 
 
@@ -100,8 +167,13 @@ def mobile_bills(request, site_id):
         return err
 
     if request.method == 'GET':
-        bills = Bill.objects.filter(site=site).order_by('-log_date')[:50]
-        return success_response('Bills retrieved.', BillSerializer(bills, many=True).data)
+        bills = Bill.objects.filter(site=site).order_by('-log_date', '-created_at')
+        date_from, date_to = _parse_date_range(request)
+        if date_from:
+            bills = bills.filter(log_date__gte=date_from)
+        if date_to:
+            bills = bills.filter(log_date__lte=date_to)
+        return success_response('Bills retrieved.', BillSerializer(bills[:100], many=True).data)
 
     # POST — create new bill
     serializer = BillCreateSerializer(data=request.data)
@@ -110,6 +182,36 @@ def mobile_bills(request, site_id):
 
     bill = serializer.save(site=site, logged_by=request.user)
     return success_response('Bill logged.', BillSerializer(bill).data, 201)
+
+
+@api_view(['PATCH', 'DELETE'])
+@permission_classes([IsOwnerOrManager])
+def mobile_bill_detail(request, site_id, bill_id):
+    """
+    PATCH/DELETE /api/mobile/sites/:id/bills/:billId/
+    Managers: own records only, within the 24-hour edit window.
+    """
+    site, err = _get_site_or_error(request.user, site_id)
+    if err:
+        return err
+    try:
+        bill = Bill.objects.get(id=bill_id, site=site)
+    except Bill.DoesNotExist:
+        return error_response('Bill not found.', {}, 404)
+
+    err = _check_edit_window(request.user, bill)
+    if err:
+        return err
+
+    if request.method == 'DELETE':
+        bill.delete()
+        return success_response('Bill deleted.')
+
+    serializer = BillCreateSerializer(bill, data=request.data, partial=True)
+    if not serializer.is_valid():
+        return error_response('Validation failed.', serializer.errors, 422)
+    bill = serializer.save()
+    return success_response('Bill updated.', BillSerializer(bill).data)
 
 
 @api_view(['POST'])
@@ -164,6 +266,35 @@ def mobile_workers(request, site_id):
     return success_response('Worker added.', WorkerSerializer(worker).data, 201)
 
 
+@api_view(['PATCH', 'DELETE'])
+@permission_classes([IsOwnerOrManager])
+def mobile_worker_detail(request, site_id, worker_id):
+    """
+    PATCH/DELETE /api/mobile/sites/:id/workers/:workerId/
+    Edit a worker's roster details, or deactivate (soft-delete) them.
+    Both managers and owners may manage the roster.
+    """
+    site, err = _get_site_or_error(request.user, site_id)
+    if err:
+        return err
+    try:
+        worker = Worker.objects.get(id=worker_id, site=site)
+    except Worker.DoesNotExist:
+        return error_response('Worker not found.', {}, 404)
+
+    if request.method == 'DELETE':
+        # Soft-delete so historical attendance/wage records stay intact.
+        worker.is_active = False
+        worker.save(update_fields=['is_active'])
+        return success_response('Worker removed from roster.')
+
+    serializer = WorkerCreateSerializer(worker, data=request.data, partial=True)
+    if not serializer.is_valid():
+        return error_response('Validation failed.', serializer.errors, 422)
+    worker = serializer.save()
+    return success_response('Worker updated.', WorkerSerializer(worker).data)
+
+
 # ---------------------------------------------------------------------------
 # Attendance
 # ---------------------------------------------------------------------------
@@ -204,14 +335,21 @@ def mobile_attendance(request, site_id):
             from apps.attendance.services import resolve_attendance_rate
             rate_lkr = resolve_attendance_rate(worker, rec)
 
+            status_val = rec.get('status', 'present')
+            # Absent reason / note only apply when the worker is marked absent.
+            absent_reason = rec.get('absent_reason') if status_val == 'absent' else None
+            note = rec.get('note', '') or ''
+
             att, created = DailyAttendance.objects.update_or_create(
                 site=site,
                 worker=worker,
                 log_date=log_date,
                 defaults={
-                    'status': rec.get('status', 'present'),
+                    'status': status_val,
                     'overtime_hours': rec.get('overtime_hours', 0),
                     'daily_rate_lkr': rate_lkr,
+                    'absent_reason': absent_reason,
+                    'note': note,
                     'logged_by': request.user,
                     'is_rain_day': is_rain_day,
                     'is_synced': True,
@@ -295,6 +433,30 @@ def mobile_progress(request, site_id):
     return success_response(message, ProgressLogSerializer(log).data, 201 if created else 200)
 
 
+@api_view(['DELETE'])
+@permission_classes([IsOwnerOrManager])
+def mobile_progress_detail(request, site_id, log_id):
+    """
+    DELETE /api/mobile/sites/:id/progress/:logId/
+    Managers: own logs only, within the 24-hour window.
+    (Edits go through the POST upsert which already targets today's log.)
+    """
+    site, err = _get_site_or_error(request.user, site_id)
+    if err:
+        return err
+    try:
+        log = ProgressLog.objects.get(id=log_id, site=site)
+    except ProgressLog.DoesNotExist:
+        return error_response('Progress log not found.', {}, 404)
+
+    err = _check_edit_window(request.user, log)
+    if err:
+        return err
+
+    log.delete()
+    return success_response('Progress log deleted.')
+
+
 @api_view(['POST'])
 @permission_classes([IsOwnerOrManager])
 def mobile_progress_photos(request, site_id, log_id):
@@ -328,6 +490,43 @@ def mobile_progress_photos(request, site_id, log_id):
         created_photos.append(photo)
 
     return success_response('Photos added.', ProgressPhotoSerializer(created_photos, many=True).data, 201)
+
+
+# ---------------------------------------------------------------------------
+# Photo upload (development: saves to MEDIA_ROOT; production: Supabase)
+# ---------------------------------------------------------------------------
+
+@api_view(['POST'])
+@permission_classes([IsOwnerOrManager])
+def mobile_upload(request):
+    """
+    POST /api/mobile/upload/ — multipart form with a 'file' field.
+    Saves the file and returns its absolute URL for use in bill_photo_url /
+    progress photo_url fields.
+    """
+    import uuid as _uuid
+    from pathlib import Path
+    from django.conf import settings
+
+    upload = request.FILES.get('file')
+    if not upload:
+        return error_response('file is required.', {}, 400)
+    if upload.size > 10 * 1024 * 1024:
+        return error_response('File too large (max 10MB).', {}, 400)
+
+    ext = Path(upload.name).suffix.lower() or '.jpg'
+    if ext not in {'.jpg', '.jpeg', '.png', '.webp', '.heic'}:
+        return error_response('Only image files are allowed.', {}, 400)
+
+    rel_path = Path('mobile-uploads') / f'{_uuid.uuid4().hex}{ext}'
+    dest = Path(settings.MEDIA_ROOT) / rel_path
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    with open(dest, 'wb') as fh:
+        for chunk in upload.chunks():
+            fh.write(chunk)
+
+    url = request.build_absolute_uri(f"{settings.MEDIA_URL}{rel_path.as_posix()}")
+    return success_response('File uploaded.', {'url': url}, 201)
 
 
 # ---------------------------------------------------------------------------

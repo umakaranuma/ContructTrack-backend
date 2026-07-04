@@ -9,6 +9,7 @@ import logging
 from datetime import timedelta, date
 from django.contrib.auth import authenticate
 from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework_simplejwt.tokens import RefreshToken
@@ -286,13 +287,52 @@ def admin_package_detail(request, package_id):
 # Payment Management
 # ---------------------------------------------------------------------------
 
+def _apply_admin_period(qs, request, date_field='payment_date'):
+    """
+    Filter a payment/tenant queryset by ?date_from / ?date_to (YYYY-MM-DD)
+    or ?month=YYYY-MM. Returns (qs, error_or_None).
+    """
+    date_from = request.query_params.get('date_from')
+    date_to = request.query_params.get('date_to')
+    if date_from or date_to:
+        if date_from:
+            qs = qs.filter(**{f'{date_field}__gte': date_from})
+        if date_to:
+            qs = qs.filter(**{f'{date_field}__lte': date_to})
+        return qs, None
+    month_str = request.query_params.get('month')
+    if month_str:
+        try:
+            year, month = month_str.split('-')
+            qs = qs.filter(**{f'{date_field}__year': int(year), f'{date_field}__month': int(month)})
+        except ValueError:
+            return qs, error_response('month must be YYYY-MM.', {}, 400)
+    return qs, None
+
+
 @api_view(['GET'])
 @permission_classes([IsFinanceAdmin])
 def admin_payment_list(request):
     payments = Payment.objects.select_related('tenant', 'package').all()
+
     status_filter = request.query_params.get('status')
     if status_filter:
         payments = payments.filter(status=status_filter)
+
+    method_filter = request.query_params.get('method')
+    if method_filter:
+        payments = payments.filter(method=method_filter)
+
+    search = request.query_params.get('search', '').strip()
+    if search:
+        payments = payments.filter(
+            Q(tenant__company_name__icontains=search) | Q(gateway_ref__icontains=search)
+        )
+
+    payments, err = _apply_admin_period(payments, request)
+    if err:
+        return err
+
     page = int(request.query_params.get('page', 1))
     limit = int(request.query_params.get('limit', 20))
     paged, total, pages = paginate_queryset(payments, page, limit)
@@ -359,14 +399,10 @@ def admin_refund_payment(request, payment_id):
 def admin_revenue_summary(request):
     from django.db.models import Sum
 
-    month_str = request.query_params.get('month')
-    payments = Payment.objects.filter(status='success')
-    if month_str:
-        try:
-            year, month = month_str.split('-')
-            payments = payments.filter(payment_date__year=int(year), payment_date__month=int(month))
-        except ValueError:
-            return error_response('month must be YYYY-MM.', {}, 400)
+    base = Payment.objects.filter(status='success')
+    payments, err = _apply_admin_period(base, request)
+    if err:
+        return err
 
     total = payments.aggregate(t=Sum('amount_lkr'))['t'] or 0
     by_method = {
@@ -374,11 +410,83 @@ def admin_revenue_summary(request):
         for m in ['payhere', 'webxpay', 'bank_transfer', 'manual']
     }
 
+    # Revenue grouped by package tier for the selected period.
+    tier_rows = (
+        payments.values('package__name')
+        .annotate(gross=Sum('amount_lkr'))
+        .order_by('-gross')
+    )
+    by_tier = [
+        {
+            'tier': (r['package__name'] or 'Unknown'),
+            'gross_lkr': float(r['gross'] or 0),
+            'tenants': payments.filter(package__name=r['package__name'])
+                               .values('tenant').distinct().count(),
+        }
+        for r in tier_rows
+    ]
+
+    # Last 6 months revenue-by-tier trend for the chart (ignores the period filter
+    # so the trend line is always complete).
+    from datetime import date as _date, timedelta as _td
+    today = timezone.now().date()
+    tiers = list(
+        Payment.objects.filter(status='success')
+        .exclude(package__name__isnull=True)
+        .values_list('package__name', flat=True).distinct()
+    )
+    trend = []
+    for i in range(5, -1, -1):
+        y, m = today.year, today.month - i
+        while m <= 0:
+            m += 12
+            y -= 1
+        month_payments = Payment.objects.filter(
+            status='success', payment_date__year=y, payment_date__month=m,
+        )
+        point = {'month': _date(y, m, 1).strftime('%b')}
+        for tier in tiers:
+            point[tier] = float(
+                month_payments.filter(package__name=tier)
+                .aggregate(t=Sum('amount_lkr'))['t'] or 0
+            )
+        trend.append(point)
+
     return success_response('Revenue summary.', {
         'total_revenue_lkr': float(total),
         'by_method': by_method,
+        'by_tier': by_tier,
+        'tiers': tiers,
+        'trend': trend,
         'payment_count': payments.count(),
     })
+
+
+@api_view(['GET'])
+@permission_classes([IsFinanceAdmin])
+def admin_upcoming_renewals(request):
+    """GET /api/admin/payments/upcoming-renewals/?days=30"""
+    days = int(request.query_params.get('days', 30))
+    now = timezone.now()
+    horizon = now + timedelta(days=days)
+    tenants = (
+        Tenant.objects.filter(
+            subscription_end__gte=now, subscription_end__lte=horizon,
+        )
+        .select_related('package')
+        .order_by('subscription_end')
+    )
+    results = [
+        {
+            'id': str(t.id),
+            'company': t.company_name,
+            'package': t.package.name if t.package else '—',
+            'amount': float(t.package.price_lkr) if t.package else 0,
+            'due': t.subscription_end.date().isoformat() if t.subscription_end else None,
+        }
+        for t in tenants
+    ]
+    return success_response('Upcoming renewals.', results)
 
 
 # ---------------------------------------------------------------------------

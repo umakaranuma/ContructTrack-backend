@@ -29,6 +29,7 @@ urlpatterns = [
     path('payments/manual/', v.admin_manual_payment, name='admin-payment-manual'),
     path('payments/<uuid:payment_id>/refund/', v.admin_refund_payment, name='admin-payment-refund'),
     path('payments/revenue-summary/', v.admin_revenue_summary, name='admin-revenue-summary'),
+    path('payments/upcoming-renewals/', v.admin_upcoming_renewals, name='admin-upcoming-renewals'),
 
     # Mobile user management
     path('mobile-users/', v.admin_mobile_users, name='admin-mobile-users'),

@@ -4,6 +4,8 @@ All routes are namespaced under /api/ to keep the URL space clean and
 versioning-friendly (prefix can become /api/v1/ without touching app urls).
 """
 from django.urls import path, include
+from django.conf import settings
+from django.conf.urls.static import static
 
 urlpatterns = [
     # Authentication — login, register, JWT refresh, profile
@@ -33,9 +35,15 @@ urlpatterns = [
     # Mobile-first endpoints (offline-sync, GPS photo upload)
     path('api/mobile/', include('apps.core.urls_mobile')),
 
+    # Contract + subcontract management
+    path('api/contracts/', include('apps.contracts.urls')),
+
     # Payment gateway webhooks + initiation
     path('api/payments/', include('apps.payments.urls')),
 
     # Internal admin panel API (separate from Django admin)
     path('api/admin/', include('apps.core.urls_admin')),
 ]
+
+# Serve uploaded media in development
+urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)

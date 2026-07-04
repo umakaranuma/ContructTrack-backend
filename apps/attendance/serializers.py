@@ -32,6 +32,7 @@ class DailyAttendanceSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'worker', 'worker_name', 'log_date', 'status',
             'overtime_hours', 'daily_rate_lkr', 'total_earned_lkr',
+            'absent_reason', 'note',
             'is_paid', 'is_rain_day', 'is_synced',
         ]
         read_only_fields = ['id', 'worker_name', 'daily_rate_lkr', 'total_earned_lkr']

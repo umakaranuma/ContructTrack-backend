@@ -49,12 +49,28 @@ class DailyAttendance(models.Model):
         ('absent', 'Absent'),
     ]
 
+    ABSENT_REASON_CHOICES = [
+        ('sick', 'Sick / Medical'),
+        ('personal', 'Personal Leave'),
+        ('no_show', 'Did Not Show Up'),
+        ('rain', 'Rain Day'),
+        ('other_site', 'Working at Another Site'),
+        ('terminated', 'No Longer Employed'),
+        ('other', 'Other'),
+    ]
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     site = models.ForeignKey('sites.Site', on_delete=models.CASCADE, related_name='attendance_records')
     worker = models.ForeignKey(Worker, on_delete=models.CASCADE, related_name='attendance')
     log_date = models.DateField()
     status = models.CharField(max_length=10, choices=STATUS_CHOICES, default='present')
     overtime_hours = models.DecimalField(max_digits=4, decimal_places=1, default=0)
+
+    # Only meaningful when status == 'absent' — captures why the worker missed the day.
+    absent_reason = models.CharField(
+        max_length=20, choices=ABSENT_REASON_CHOICES, blank=True, null=True,
+    )
+    note = models.CharField(max_length=255, blank=True, null=True)
 
     # Snapshot rate at time of log — rate may change but historical records must not
     daily_rate_lkr = models.DecimalField(max_digits=10, decimal_places=2)

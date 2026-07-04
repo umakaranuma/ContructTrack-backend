@@ -4,6 +4,7 @@ from . import views
 urlpatterns = [
     path('', views.site_list_create, name='site-list'),
     path('<uuid:site_id>/', views.site_detail, name='site-detail'),
+    path('<uuid:site_id>/financials/', views.site_financials, name='site-financials'),
 
     # Sub-resources
     path('<uuid:site_id>/logs/', views.site_logs, name='site-logs'),

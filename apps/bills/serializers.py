@@ -53,7 +53,12 @@ class BillCreateSerializer(serializers.ModelSerializer):
         ]
 
     def validate(self, data):
-        # Enforce that bill_photo_url is present — core anti-fraud requirement
-        if not data.get('bill_photo_url'):
-            raise serializers.ValidationError({'bill_photo_url': 'A bill photo is required.'})
+        # Enforce that bill_photo_url is present — core anti-fraud requirement.
+        # On partial updates the existing photo is kept, so only check creates
+        # or explicit attempts to blank the photo.
+        if self.instance is None:
+            if not data.get('bill_photo_url'):
+                raise serializers.ValidationError({'bill_photo_url': 'A bill photo is required.'})
+        elif 'bill_photo_url' in data and not data['bill_photo_url']:
+            raise serializers.ValidationError({'bill_photo_url': 'A bill photo cannot be removed.'})
         return data

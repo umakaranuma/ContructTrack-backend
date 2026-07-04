@@ -200,6 +200,37 @@ def me_view(request):
     return success_response('Profile updated.', UserProfileSerializer(request.user).data)
 
 
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def delete_account(request):
+    """
+    POST /api/auth/delete-account/
+    Body: { password }
+    Permanently deactivates the account after password confirmation.
+    We soft-delete (deactivate) rather than hard-delete so historical
+    site records (bills, attendance, progress) logged by this manager
+    remain intact for the owner's audit trail.
+    """
+    password = request.data.get('password', '')
+    if not password:
+        return error_response('Your password is required to delete the account.', {}, 400)
+
+    if not request.user.check_password(password):
+        return error_response('Password is incorrect.', {}, 400)
+
+    user = request.user
+    # Deactivate and scrub the login so the account can no longer be used.
+    user.is_active = False
+    user.set_unusable_password()
+    user.save(update_fields=['is_active', 'password'])
+
+    # Detach the manager from any active site assignments.
+    from apps.sites.models import SiteManager
+    SiteManager.objects.filter(manager=user, is_active=True).update(is_active=False)
+
+    return success_response('Your account has been deleted.')
+
+
 # ---------------------------------------------------------------------------
 # Manager management (owner-facing)
 # ---------------------------------------------------------------------------
