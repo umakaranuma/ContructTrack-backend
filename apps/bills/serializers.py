@@ -15,7 +15,8 @@ class SiteBillGridSerializer(serializers.ModelSerializer):
         fields = ['id', 'photo_url', 'supplier', 'amount', 'date', 'material', 'bill_photo_url', 'supplier_name', 'total_amount_lkr', 'log_date', 'material_type']
 
     def get_material(self, obj):
-        return obj.get_material_type_display()
+        # get_..._display() returns the raw value for custom (non-choice) labels.
+        return obj.get_material_type_display() if obj.material_type else 'Expense'
 
 
 class BillSerializer(serializers.ModelSerializer):
@@ -42,6 +43,16 @@ class BillSerializer(serializers.ModelSerializer):
 
 
 class BillCreateSerializer(serializers.ModelSerializer):
+    # Supplier and item/category are optional so the form also covers general
+    # expenses (crew lunch, transport, tools). material_type is a free CharField
+    # rather than a strict ChoiceField so custom expense labels are accepted.
+    supplier_name = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    material_type = serializers.CharField(required=False, allow_blank=True, allow_null=True, max_length=50)
+    quantity      = serializers.DecimalField(max_digits=10, decimal_places=3, required=False, default=1)
+    unit          = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    unit_price_lkr = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, default=0)
+    purpose       = serializers.CharField(required=False, allow_blank=True, allow_null=True, max_length=30)
+
     class Meta:
         model = Bill
         fields = [
@@ -59,6 +70,9 @@ class BillCreateSerializer(serializers.ModelSerializer):
         if self.instance is None:
             if not data.get('bill_photo_url'):
                 raise serializers.ValidationError({'bill_photo_url': 'A bill photo is required.'})
+            # The total amount is the one figure that must always be present.
+            if not data.get('total_amount_lkr'):
+                raise serializers.ValidationError({'total_amount_lkr': 'An amount is required.'})
         elif 'bill_photo_url' in data and not data['bill_photo_url']:
             raise serializers.ValidationError({'bill_photo_url': 'A bill photo cannot be removed.'})
         return data

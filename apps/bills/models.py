@@ -57,11 +57,15 @@ class Bill(models.Model):
         related_name='logged_bills',
     )
 
-    supplier_name = models.CharField(max_length=255)
-    material_type = models.CharField(max_length=30, choices=MATERIAL_TYPES)
-    quantity = models.DecimalField(max_digits=10, decimal_places=3)
-    unit = models.CharField(max_length=50, help_text='e.g. bags, cubic meters, kg')
-    unit_price_lkr = models.DecimalField(max_digits=12, decimal_places=2)
+    # Supplier / item are optional so the log also covers general expenses
+    # (e.g. crew lunch, transport, small tools) — not just material deliveries.
+    supplier_name = models.CharField(max_length=255, blank=True, null=True)
+    # choices drive the suggestion list, but any custom label is accepted so
+    # managers can record miscellaneous expenses.
+    material_type = models.CharField(max_length=50, blank=True, null=True, default='other')
+    quantity = models.DecimalField(max_digits=10, decimal_places=3, default=1)
+    unit = models.CharField(max_length=50, blank=True, null=True, help_text='e.g. bags, cubic meters, kg')
+    unit_price_lkr = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     total_amount_lkr = models.DecimalField(max_digits=14, decimal_places=2)
 
     payment_method = models.CharField(max_length=20, choices=PAYMENT_METHODS, default='cash')
@@ -89,4 +93,4 @@ class Bill(models.Model):
         ordering = ['-log_date', '-created_at']
 
     def __str__(self):
-        return f"{self.material_type} x{self.quantity} at {self.site.name} on {self.log_date}"
+        return f"{self.material_type or 'expense'} x{self.quantity} at {self.site.name} on {self.log_date}"
